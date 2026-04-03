@@ -1,8 +1,5 @@
-batch_outputs/
 .DS_Store
-.ipynb_checkpoints/
-.matplotlib/
-.ruff_cache/
-.venv/
 __pycache__/
-*.pyc
+.matplotlib/
+.venv/
+batch_outputs/

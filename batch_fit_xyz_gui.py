@@ -2,8 +2,8 @@
 
 Public-release note:
 The subset-inspection workflow is intentionally disabled for the standalone
-public GUI build. The implementation remains in this file for future internal
-restoration, but the tab is hidden and the loader is hard-gated by an explicit
+public GUI build. The implementation remains in this file for possible future
+re-enablement, but the tab is hidden and the loader is hard-gated by an explicit
 release toggle below.
 """
 

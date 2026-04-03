@@ -295,14 +295,11 @@ def fit_sphere(
 
     r0 = (sag**2 + rho_edge**2) / (2.0 * sag)
     z0 = zv - r0
-    initial_guess = (0.0, 0.0, z0, abs(r0))
+    # Keep the signed notebook-style seed so the optimizer can converge to the
+    # physically correct sphere branch for AP/PP-style caps.
+    initial_guess = (0.0, 0.0, z0, r0)
 
-    result = least_squares(
-        sphere_residuals,
-        initial_guess,
-        args=(x, y, z),
-        bounds=([-np.inf, -np.inf, -np.inf, 1e-9], np.inf),
-    )
+    result = least_squares(sphere_residuals, initial_guess, args=(x, y, z))
     x0_fit, y0_fit, z0_fit, r_fit = result.x
     residuals = sphere_residuals(result.x, x, y, z)
     return x0_fit, y0_fit, z0_fit, r_fit, residuals

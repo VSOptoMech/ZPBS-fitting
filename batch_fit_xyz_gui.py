@@ -428,36 +428,35 @@ def _snap_axis_bound(value: float, *, direction: str) -> float:
     raise ValueError(f"Unsupported snap direction: {direction}")
 
 
-def snapped_axis_limits(values: np.ndarray, *, include_zero: bool = False) -> tuple[float, float, float]:
-    """Return outward-rounded y-axis limits based on the actual extrema."""
+def snapped_axis_limits(
+    values: np.ndarray, *, include_zero: bool = False, target_ticks: int = 5
+) -> tuple[float, float, float]:
+    """Return y-axis limits snapped to a shared coarse grid from the data span."""
     arr = np.asarray(values, dtype=float)
     arr = arr[np.isfinite(arr)]
     if arr.size == 0:
         return -1.0, 1.0, 0.5
 
-    raw_min = float(np.min(arr))
-    raw_max = float(np.max(arr))
-    min_value = raw_min
-    max_value = raw_max
+    min_value = float(np.min(arr))
+    max_value = float(np.max(arr))
     if include_zero:
         min_value = min(min_value, 0.0)
         max_value = max(max_value, 0.0)
 
     if math.isclose(min_value, max_value):
         base = max(abs(min_value), 1e-3)
-        half_window = _nice_axis_step(base * 0.4, target_ticks=3)
+        half_window = _nice_axis_step(base * 0.8, target_ticks=3)
         y_min = min_value - half_window
         y_max = max_value + half_window
-        step = _nice_axis_step(y_max - y_min)
+        step = _nice_axis_step(y_max - y_min, target_ticks=target_ticks)
         return float(y_min), float(y_max), float(step)
 
-    y_min = _snap_axis_bound(min_value, direction="down")
-    y_max = _snap_axis_bound(max_value, direction="up")
+    step = _nice_axis_step(max_value - min_value, target_ticks=target_ticks)
+    y_min = float(math.floor(min_value / step) * step)
+    y_max = float(math.ceil(max_value / step) * step)
     if math.isclose(y_min, y_max):
-        step = _nice_axis_step(max(abs(y_min), 1e-3))
         y_min -= step
         y_max += step
-    step = _nice_axis_step(y_max - y_min)
     return float(y_min), float(y_max), float(step)
 
 

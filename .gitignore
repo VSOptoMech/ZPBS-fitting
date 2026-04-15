@@ -3,3 +3,4 @@ __pycache__/
 .matplotlib/
 .venv/
 batch_outputs/
+src/*.egg-info/

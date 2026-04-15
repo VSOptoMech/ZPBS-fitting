@@ -1,5 +1,8 @@
 """Core functions for Zernike fitting on point-cloud and matrix CSV inputs."""
 
+# Last revision date: 2026-04-03
+# Latest git commit: 74f1f04
+
 from __future__ import annotations
 
 import csv
@@ -8,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.optimize import curve_fit, least_squares
+from scipy.optimize import least_squares
 
 try:
     import plotly.graph_objects as go
@@ -651,7 +654,6 @@ def fit_surface_with_zernike(
     *,
     surf_id: str,
     flip_posterior_sign: bool = True,
-    maxfev: int = 10000,
     method: str = "lstsq",
     n_modes: int = N_ZERNIKE_TERMS,
     rcond: float | None = None,
@@ -684,57 +686,35 @@ def fit_surface_with_zernike(
     idx_center = int(np.argmin(rho))
     zv = float(z[idx_center])
     method_key = method.strip().lower()
-    if method_key == "lstsq":
-        (
-            zpoly_fits_lin,
-            zpoly_surf,
-            zpoly_surf_resid,
-            zpoly_surf_rms,
-            zpoly_surf_cond,
-        ) = fit_zernike_lstsq(rho_norm, phi, z, n_modes=n_modes, rcond=rcond)
-        zpoly_fits = _pad_coeffs_to_45(zpoly_fits_lin)
-    elif method_key == "curve_fit":
-        zpoly_fit0 = _build_initial_fit_guess(zv=zv, r_fit=r_fit)
-        zpoly_fits, _ = curve_fit(zernike_polar, pol_loci, z, zpoly_fit0, maxfev=maxfev)
-        zpoly_surf = zernike_polar(pol_loci, *zpoly_fits)
-        zpoly_surf_resid = z - zpoly_surf
-        zpoly_surf_rms = float(np.sqrt(np.mean(zpoly_surf_resid**2)))
-        A = zernike_polar_basis(rho_norm, phi, n_modes=N_ZERNIKE_TERMS)
-        zpoly_surf_cond = float(np.linalg.cond(A))
-    else:
-        raise ValueError("method must be one of {'lstsq', 'curve_fit'}")
+    if method_key != "lstsq":
+        raise ValueError(
+            f"Unsupported Zernike fitting method in maintained code: {method!r}. Only 'lstsq' is supported."
+        )
+    (
+        zpoly_fits_lin,
+        zpoly_surf,
+        zpoly_surf_resid,
+        zpoly_surf_rms,
+        zpoly_surf_cond,
+    ) = fit_zernike_lstsq(rho_norm, phi, z, n_modes=n_modes, rcond=rcond)
+    zpoly_fits = _pad_coeffs_to_45(zpoly_fits_lin)
     zpoly_surf_sse = float(np.sum(zpoly_surf_resid**2))
 
     zv2 = float(best_sphere_resid[idx_center])
-    if method_key == "lstsq":
-        (
-            zpoly_fits2_lin,
-            zpoly_surf2,
-            zpoly_surf_resid2,
-            zpoly_surf_rms2,
-            zpoly_surf_cond2,
-        ) = fit_zernike_lstsq(
-            rho_norm,
-            phi,
-            best_sphere_resid,
-            n_modes=n_modes,
-            rcond=rcond,
-        )
-        zpoly_fits2 = _pad_coeffs_to_45(zpoly_fits2_lin)
-    else:
-        zpoly_fit00 = _build_residual_fit_guess(zv2=zv2)
-        zpoly_fits2, _ = curve_fit(
-            zernike_polar,
-            pol_loci,
-            best_sphere_resid,
-            zpoly_fit00,
-            maxfev=maxfev,
-        )
-        zpoly_surf2 = zernike_polar(pol_loci, *zpoly_fits2)
-        zpoly_surf_resid2 = best_sphere_resid - zpoly_surf2
-        zpoly_surf_rms2 = float(np.sqrt(np.mean(zpoly_surf_resid2**2)))
-        A = zernike_polar_basis(rho_norm, phi, n_modes=N_ZERNIKE_TERMS)
-        zpoly_surf_cond2 = float(np.linalg.cond(A))
+    (
+        zpoly_fits2_lin,
+        zpoly_surf2,
+        zpoly_surf_resid2,
+        zpoly_surf_rms2,
+        zpoly_surf_cond2,
+    ) = fit_zernike_lstsq(
+        rho_norm,
+        phi,
+        best_sphere_resid,
+        n_modes=n_modes,
+        rcond=rcond,
+    )
+    zpoly_fits2 = _pad_coeffs_to_45(zpoly_fits2_lin)
     zpoly_surf_sse2 = float(np.sum(zpoly_surf_resid2**2))
 
     return SurfaceFitResults(
@@ -879,6 +859,21 @@ def export_zernike_coefficients_csv(
     return output_file
 
 
+def _format_coefficient_csv_value(label: str, value: object) -> object:
+    """Format selected coefficient-report floats as stable CSV strings."""
+    if label in {"Vertex (mm)", "Vertex residual (mm)"}:
+        return f"{float(value):.6f}"
+    if label.startswith("Z"):
+        return np.format_float_positional(
+            float(value),
+            precision=15,
+            unique=True,
+            fractional=False,
+            trim="-",
+        )
+    return value
+
+
 def build_zernike_coefficients_rows(
     *,
     design_id: str,
@@ -905,4 +900,4 @@ def build_zernike_coefficients_rows(
     ]
     for i, term in enumerate(zernike_coefficients_mm, start=1):
         rows.append((f"Z{i}", term))
-    return rows
+    return [(label, _format_coefficient_csv_value(label, value)) for label, value in rows]

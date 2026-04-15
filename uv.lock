@@ -583,8 +583,8 @@ wheels = [
 
 [[package]]
 name = "xyz-surface-fitting-toolkit"
-version = "0.1.0"
-source = { virtual = "." }
+version = "1.1.0"
+source = { editable = "." }
 dependencies = [
     { name = "h5py" },
     { name = "matplotlib" },

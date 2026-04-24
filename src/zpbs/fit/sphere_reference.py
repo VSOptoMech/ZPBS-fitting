@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from scipy.optimize import least_squares
 
-from azp_csv_pipeline import cartesian_to_polar, fit_sphere
+from zpbs.azp_csv_pipeline import cartesian_to_polar, fit_sphere
 from zpbs.common import validate_center_weight
 from zpbs.io.xyz import load_xyz_point_cloud
 from zpbs.models import SpherePrefitEntry, SphereReferenceFit, VertexTarget
@@ -146,9 +146,7 @@ def fit_sphere_with_fixed_radius(
     rho = np.sqrt(x_arr**2 + y_arr**2)
     rho_edge = float(np.max(rho))
     if radius_um <= rho_edge:
-        raise ValueError(
-            f"Fixed radius {radius_um} um is smaller than the observed aperture radius {rho_edge} um."
-        )
+        raise ValueError(f"Fixed radius {radius_um} um is smaller than the observed aperture radius {rho_edge} um.")
 
     sag_mag = radius_um - np.sqrt(max(radius_um**2 - rho_edge**2, 0.0))
     if np.isclose(sag_mag, 0.0):
@@ -254,8 +252,7 @@ def fit_sphere_robust(x: Any, y: Any, z: Any, *, sphere_fit_mode: str, center_we
     mode = sphere_fit_mode.strip().lower()
     if mode not in {"legacy_lsq", "center_weighted", "vertex_locked"}:
         raise ValueError(
-            "sphere_fit_mode must be one of legacy_lsq, center_weighted, or vertex_locked; "
-            f"got {sphere_fit_mode!r}."
+            f"sphere_fit_mode must be one of legacy_lsq, center_weighted, or vertex_locked; got {sphere_fit_mode!r}."
         )
     weight = validate_center_weight(center_weight)
     x_arr = np.asarray(x, dtype=float)
@@ -300,9 +297,7 @@ def fit_sphere_robust(x: Any, y: Any, z: Any, *, sphere_fit_mode: str, center_we
         radius_um = float(radius_params[0])
         z0_fit = float(target_vertex.z_um - surface_branch_sign * radius_um)
         distances = np.sqrt(
-            (x_arr - target_vertex.x_um) ** 2
-            + (y_arr - target_vertex.y_um) ** 2
-            + (z_arr - z0_fit) ** 2
+            (x_arr - target_vertex.x_um) ** 2 + (y_arr - target_vertex.y_um) ** 2 + (z_arr - z0_fit) ** 2
         )
         return distances - radius_um
 

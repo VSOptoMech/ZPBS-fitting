@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from matplotlib.figure import Figure
 
-from ..common import uses_posterior_sign_convention
+from ..common import format_mae_rms_display, uses_posterior_sign_convention
 from ..models import FitArtifacts
 from ..reporting.batch_reports import radial_bin_profile, sphere_profile_z
 from .support import (
@@ -45,9 +44,9 @@ def _render_detailed_analysis(
     )
     rho_meas, z_meas = radial_bin_profile(artifacts.rho, artifacts.z, bins=64, np=np)
     rho_sphere, z_sphere = radial_bin_profile(artifacts.rho, sphere_z, bins=64, np=np)
-    rho_fit, z_fit = radial_bin_profile(artifacts.rho, artifacts.zernike_surface, bins=64, np=np)
-    rho_resid, z_resid = radial_bin_profile(artifacts.rho, artifacts.zernike_surface_residuals, bins=64, np=np)
-    rho_sphere_resid, z_sphere_resid = radial_bin_profile(artifacts.rho, artifacts.sphere_residuals, bins=64, np=np)
+    rho_fit, z_fit = radial_bin_profile(artifacts.rho, artifacts.zpbs_to_data_surface_um, bins=64, np=np)
+    rho_resid, z_resid = radial_bin_profile(artifacts.rho, artifacts.zpbs_to_data_residuals_um, bins=64, np=np)
+    rho_sphere_resid, z_sphere_resid = radial_bin_profile(artifacts.rho, artifacts.sphere_residuals_um, bins=64, np=np)
 
     sample_stride = max(1, len(artifacts.x) // 3500)
     figure.clear()
@@ -59,8 +58,8 @@ def _render_detailed_analysis(
 
     ax_profile.plot(rho_meas, z_meas, color="#111827", linewidth=1.2, label="Measured")
     ax_profile.plot(rho_sphere, z_sphere, color="#2563eb", linewidth=1.0, label="Sphere")
-    ax_profile.plot(rho_fit, z_fit, color="#dc2626", linewidth=1.0, label="Zernike")
-    ax_profile.set_title("Radial Profile vs Fit", fontsize=10)
+    ax_profile.plot(rho_fit, z_fit, color="#dc2626", linewidth=1.0, label="ZPBS-to-Data")
+    ax_profile.set_title("Radial Profile vs Reconstructed Fit", fontsize=10)
     ax_profile.set_xlabel("rho (um)")
     ax_profile.set_ylabel("z (um)")
     if rho_axis_limit_um is not None:
@@ -84,12 +83,12 @@ def _render_detailed_analysis(
 
     ax_residual.plot(rho_resid, z_resid, color="#059669", linewidth=1.0)
     ax_residual.axhline(0.0, color="#6b7280", linewidth=0.8, alpha=0.8)
-    ax_residual.set_title("Zernike Residual vs Radius", fontsize=10)
+    ax_residual.set_title("ZPBS-to-Data Residual vs Radius", fontsize=10)
     ax_residual.set_xlabel("rho (um)")
     ax_residual.set_ylabel("Residual (um)")
     if rho_axis_limit_um is not None:
         ax_residual.set_xlim(0.0, rho_axis_limit_um)
-    zernike_y_min, zernike_y_max, zernike_step = snapped_axis_limits(artifacts.zernike_surface_residuals)
+    zernike_y_min, zernike_y_max, zernike_step = snapped_axis_limits(artifacts.zpbs_to_data_residuals_um)
     ax_residual.set_ylim(zernike_y_min, zernike_y_max)
     ax_residual.set_yticks(np.arange(zernike_y_min, zernike_y_max + (0.5 * zernike_step), zernike_step))
     ax_residual.grid(True, alpha=0.2)
@@ -101,7 +100,7 @@ def _render_detailed_analysis(
     ax_sphere_residual.set_ylabel("Residual (um)")
     if rho_axis_limit_um is not None:
         ax_sphere_residual.set_xlim(0.0, rho_axis_limit_um)
-    sphere_y_min, sphere_y_max, sphere_step = snapped_axis_limits(artifacts.sphere_residuals)
+    sphere_y_min, sphere_y_max, sphere_step = snapped_axis_limits(artifacts.sphere_residuals_um)
     ax_sphere_residual.set_ylim(sphere_y_min, sphere_y_max)
     ax_sphere_residual.set_yticks(np.arange(sphere_y_min, sphere_y_max + (0.5 * sphere_step), sphere_step))
     ax_sphere_residual.grid(True, alpha=0.2)
@@ -140,9 +139,9 @@ def _render_detailed_analysis(
             f"Vertex mismatch z: {artifacts.vertex_mismatch_z_um:.2e} um",
             f"Applied norm radius: {artifacts.norm_radius_um:.2f} um",
             f"Observed aperture radius: {artifacts.observed_aperture_radius_um:.2f} um",
-            f"Sphere SSE: {artifacts.sphere_sse:.2e}",
-            f"Surface RMS: {artifacts.surface_zernike_rms:.2e}",
-            f"Residual RMS: {artifacts.sphere_residual_zernike_rms:.2e}",
+            f"Sphere RMS: {format_mae_rms_display(artifacts.sphere_rms_um, precision=3)} um",
+            f"ZPBS residual RMS: {format_mae_rms_display(artifacts.zpbs_residual_rms_um, precision=3)} um",
+            f"ZPBS residual cond: {artifacts.zpbs_residual_cond:.2e}",
             f"Coeff file: {artifacts.output_coefficients_csv.name}",
             f"Coeff metadata radius: {coeff_meta.get('Norm. Radius (mm)', 'n/a')} mm",
             "",
@@ -159,9 +158,9 @@ def _render_detailed_analysis(
     details = {
         "source_file": str(source_file),
         "coeff_file": str(artifacts.output_coefficients_csv),
-        "sphere_sse": format_metric(artifacts.sphere_sse, precision=2),
-        "surface_rms": format_metric(artifacts.surface_zernike_rms, precision=2),
-        "residual_rms": format_metric(artifacts.sphere_residual_zernike_rms, precision=2),
+        "sphere_rms_um": format_mae_rms_display(artifacts.sphere_rms_um, precision=3),
+        "zpbs_residual_rms_um": format_mae_rms_display(artifacts.zpbs_residual_rms_um, precision=3),
+        "zpbs_residual_cond": format_metric(artifacts.zpbs_residual_cond, precision=2),
         "sphere_fit_mode": artifacts.sphere_fit_mode,
         "center_weight": f"{artifacts.center_weight:.2f}",
         "applied_norm_radius_um": f"{artifacts.norm_radius_um:.2f}",

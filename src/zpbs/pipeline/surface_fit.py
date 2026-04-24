@@ -7,7 +7,14 @@ from typing import Any
 
 import numpy as np
 
-from azp_csv_pipeline import _pad_coeffs_to_45, cartesian_to_polar, export_zernike_coefficients_csv, fit_zernike_lstsq, zernike_polar, zernike_polar_basis
+from zpbs.azp_csv_pipeline import (
+    _pad_coeffs_to_45,
+    cartesian_to_polar,
+    export_zernike_coefficients_csv,
+    fit_zernike_lstsq,
+    zernike_polar,
+    zernike_polar_basis,
+)
 from zpbs.common import (
     clamp_normalization_radius_um,
     clamp_reference_radius_um,
@@ -19,8 +26,34 @@ from zpbs.common import (
     validate_center_weight,
     validate_zernike_method,
 )
-from zpbs.fit.sphere_reference import SphereReferenceFit, VertexTarget, fit_sphere_robust, fit_sphere_with_fixed_radius, get_sphere_prefit_entry
+from zpbs.fit.sphere_reference import (
+    SphereReferenceFit,
+    VertexTarget,
+    fit_sphere_robust,
+    fit_sphere_with_fixed_radius,
+    get_sphere_prefit_entry,
+)
 from zpbs.models import FitArtifacts, ProcessingInput, SpherePrefitEntry
+
+
+_ON_AXIS_M0_ZERO_BASED = (0, 3, 10, 21, 36)
+_ON_AXIS_M0_WEIGHTS = (
+    1.0,
+    -float(np.sqrt(3.0)),
+    float(np.sqrt(5.0)),
+    -float(np.sqrt(7.0)),
+    3.0,
+)
+
+
+def zpbs_residual_on_axis_m0_um(coefficients_um: np.ndarray) -> float:
+    """Evaluate the residual-stage m=0 contribution at rho=0 in the maintained Noll basis."""
+    coeffs = np.asarray(coefficients_um, dtype=float)
+    total = 0.0
+    for index, weight in zip(_ON_AXIS_M0_ZERO_BASED, _ON_AXIS_M0_WEIGHTS, strict=True):
+        if index < len(coeffs):
+            total += float(coeffs[index]) * weight
+    return float(total)
 
 
 def run_fit_pipeline(
@@ -166,16 +199,23 @@ def run_fit_pipeline(
     x0_fit = float(sphere_fit.x0_fit)
     y0_fit = float(sphere_fit.y0_fit)
     z0_fit = float(sphere_fit.z0_fit)
-    sphere_residuals = np.asarray(sphere_fit.residuals, dtype=float)
-    if uses_posterior_sign_convention(surf_id):
-        sphere_residuals = -sphere_residuals
-
-    sphere_sse = float(np.sum(np.square(sphere_residuals)))
-    sphere_rms = float(np.sqrt(np.mean(np.square(sphere_residuals))))
     rho, phi = cartesian_to_polar(x_arr - x0_fit, y_arr - y0_fit)
     observed_rho_max = float(np.max(rho))
     if observed_rho_max <= 0:
         raise ValueError("Invalid polar radius max; all points may be coincident.")
+
+    # Rebuild the actual fitted sphere branch in measured-z coordinates so stage metrics
+    # and the combined ZPBS-to-data reconstruction do not depend on the surface family token.
+    branch_sign = 1.0 if float(sphere_fit.reference_vertex_z_um) >= z0_fit else -1.0
+    term = np.sqrt(np.clip(float(sphere_fit.radius_um) ** 2 - np.square(rho), 0.0, None))
+    sphere_surface_um = z0_fit + (branch_sign * term)
+    sphere_residuals_z = z_arr - sphere_surface_um
+    residual_sign = -1.0 if uses_posterior_sign_convention(surf_id) else 1.0
+    sphere_residuals = residual_sign * sphere_residuals_z
+
+    sphere_sse_um2 = float(np.sum(np.square(sphere_residuals)))
+    sphere_mae_um = float(np.mean(np.abs(sphere_residuals)))
+    sphere_rms_um = float(np.sqrt(np.mean(np.square(sphere_residuals))))
 
     requested_norm_radius_um = observed_rho_max if normalization_radius_um is None else float(normalization_radius_um)
     if round_radii_um:
@@ -194,28 +234,27 @@ def run_fit_pipeline(
     pol_loci = np.stack((rho_norm, phi), axis=1)
     idx_center = int(np.argmin(rho))
     zv = float(z_arr[idx_center])
-    zv2 = float(sphere_residuals[idx_center])
-    zpoly_fits_raw, _, _, surface_rms, surface_cond = fit_zernike_lstsq(
-        rho_norm, phi, z_arr, n_modes=n_modes, rcond=rcond
-    )
-    zpoly_fits2_raw, _, _, residual_rms, residual_cond = fit_zernike_lstsq(
+    sphere_vertex_residual_um = float(sphere_residuals[idx_center])
+    zpbs_residual_coefficients_raw, _, _, _, residual_cond = fit_zernike_lstsq(
         rho_norm, phi, sphere_residuals, n_modes=n_modes, rcond=rcond
     )
 
-    zpoly_fits = _pad_coeffs_to_45(np.asarray(zpoly_fits_raw, dtype=float))
-    zpoly_fits2 = _pad_coeffs_to_45(np.asarray(zpoly_fits2_raw, dtype=float))
+    zpbs_residual_coefficients_um = _pad_coeffs_to_45(np.asarray(zpbs_residual_coefficients_raw, dtype=float))
     if zernike_coeff_sigfigs is not None:
-        zpoly_fits = round_sigfigs_array(zpoly_fits, zernike_coeff_sigfigs, np=np)
-        zpoly_fits2 = round_sigfigs_array(zpoly_fits2, zernike_coeff_sigfigs, np=np)
-
-    zernike_surface = zernike_polar(pol_loci, *zpoly_fits)
-    zernike_surface_residuals = z_arr - zernike_surface
-    zernike_residual_surface = zernike_polar(pol_loci, *zpoly_fits2)
-    zernike_residual_residuals = sphere_residuals - zernike_residual_surface
+        zpbs_residual_coefficients_um = round_sigfigs_array(zpbs_residual_coefficients_um, zernike_coeff_sigfigs, np=np)
 
     _ = zernike_polar_basis
-    surface_rms = float(np.sqrt(np.mean(zernike_surface_residuals**2)))
-    residual_rms = float(np.sqrt(np.mean(zernike_residual_residuals**2)))
+    zpbs_residual_surface_um = zernike_polar(pol_loci, *zpbs_residual_coefficients_um)
+    zpbs_residual_residuals_um = sphere_residuals - zpbs_residual_surface_um
+    zpbs_residual_sse_um2 = float(np.sum(np.square(zpbs_residual_residuals_um)))
+    zpbs_residual_mae_um = float(np.mean(np.abs(zpbs_residual_residuals_um)))
+    zpbs_residual_rms_um = float(np.sqrt(np.mean(np.square(zpbs_residual_residuals_um))))
+    zpbs_residual_on_axis_m0_value_um = zpbs_residual_on_axis_m0_um(zpbs_residual_coefficients_um)
+
+    zpbs_to_data_surface_um = sphere_surface_um + (residual_sign * zpbs_residual_surface_um)
+    zpbs_to_data_residuals_um = z_arr - zpbs_to_data_surface_um
+    vertex_fit_um = float(zpbs_to_data_surface_um[idx_center])
+    vertex_residual_um = float(zpbs_to_data_residuals_um[idx_center])
 
     return {
         "x": x_arr,
@@ -232,23 +271,25 @@ def run_fit_pipeline(
         "prefit_best_radius_um": prefit_best_radius_um,
         "sphere_fit_mode": sphere_fit.sphere_fit_mode,
         "center_weight": sphere_fit.center_weight,
-        "sphere_residuals": sphere_residuals,
-        "sphere_sse": sphere_sse,
-        "sphere_rms": sphere_rms,
+        "sphere_residuals_um": sphere_residuals,
+        "sphere_sse_um2": sphere_sse_um2,
+        "sphere_mae_um": sphere_mae_um,
+        "sphere_rms_um": sphere_rms_um,
         "zv": zv,
-        "zv2": zv2,
-        "zpoly_fits": zpoly_fits,
-        "zpoly_fits2": zpoly_fits2,
-        "zernike_surface": zernike_surface,
-        "zernike_surface_residuals": zernike_surface_residuals,
-        "zernike_residual_surface": zernike_residual_surface,
-        "zernike_residual_residuals": zernike_residual_residuals,
-        "surface_zernike_sse": float(np.sum(zernike_surface_residuals**2)),
-        "surface_zernike_rms": float(surface_rms),
-        "surface_zernike_cond": float(surface_cond),
-        "sphere_residual_zernike_sse": float(np.sum(zernike_residual_residuals**2)),
-        "sphere_residual_zernike_rms": float(residual_rms),
-        "sphere_residual_zernike_cond": float(residual_cond),
+        "zv2": sphere_vertex_residual_um,
+        "vertex_fit_um": vertex_fit_um,
+        "sphere_vertex_residual_um": sphere_vertex_residual_um,
+        "vertex_residual_um": vertex_residual_um,
+        "zpbs_residual_coefficients_um": zpbs_residual_coefficients_um,
+        "zpbs_residual_surface_um": zpbs_residual_surface_um,
+        "zpbs_residual_residuals_um": zpbs_residual_residuals_um,
+        "zpbs_residual_sse_um2": zpbs_residual_sse_um2,
+        "zpbs_residual_mae_um": zpbs_residual_mae_um,
+        "zpbs_residual_rms_um": zpbs_residual_rms_um,
+        "zpbs_residual_cond": float(residual_cond),
+        "zpbs_residual_on_axis_m0_um": zpbs_residual_on_axis_m0_value_um,
+        "zpbs_to_data_surface_um": zpbs_to_data_surface_um,
+        "zpbs_to_data_residuals_um": zpbs_to_data_residuals_um,
         "observed_aperture_radius_um": observed_rho_max,
         "norm_radius_um": norm_radius_um,
         "target_vertex_x_um": sphere_fit.target_vertex_x_um,
@@ -317,11 +358,17 @@ def build_fit_artifacts(
         prefit_data=prefit_data,
     )
 
-    export_coefficients_um = fit_data["zpoly_fits2"].copy()
-    export_coefficients_um[0] = export_coefficients_um[0] - fit_data["zv2"]
+    export_coefficients_um = fit_data["zpbs_residual_coefficients_um"].copy()
+    export_coefficients_um[0] = export_coefficients_um[0] - fit_data["sphere_vertex_residual_um"]
     if zernike_coeff_sigfigs is not None:
         export_coefficients_um = round_sigfigs_array(export_coefficients_um, zernike_coeff_sigfigs, np=np)
-    export_coefficients_mm = (-1.0) * export_coefficients_um / 1000.0
+    # The existing CSV convention already negates the anterior export. Posterior surfaces
+    # need one extra sign inversion here so the written coefficients are Zemax-ready.
+    export_sign = 1.0 if uses_posterior_sign_convention(metadata.surf_id) else -1.0
+    export_coefficients_mm = export_sign * export_coefficients_um / 1000.0
+    signed_roc_um = (1.0 if float(fit_data["reference_vertex_z_um"]) >= float(fit_data["z0_fit"]) else -1.0) * float(
+        fit_data["applied_reference_radius_um"]
+    )
 
     coeff_dir = output_dir / "coefficients"
     coeff_path = coeff_dir / make_output_filename(metadata)
@@ -331,9 +378,9 @@ def build_fit_artifacts(
         fea_id=metadata.fea_id,
         surf_id=metadata.surf_id,
         tension_mn=format_tension(metadata.force_id),
-        base_sphere_radius_um=fit_data["applied_reference_radius_um"],
-        vertex_um=fit_data["zv"],
-        vertex_residual_um=fit_data["zv2"],
+        base_sphere_roc_um=signed_roc_um,
+        vertex_um=fit_data["vertex_fit_um"],
+        vertex_residual_um=fit_data["vertex_residual_um"],
         norm_radius_um=fit_data["norm_radius_um"],
         zernike_coefficients_mm=export_coefficients_mm,
     )
@@ -350,13 +397,12 @@ def build_fit_artifacts(
         rho=fit_data["rho"],
         phi=fit_data["phi"],
         rho_norm=fit_data["rho_norm"],
-        sphere_residuals=fit_data["sphere_residuals"],
-        zernike_surface=fit_data["zernike_surface"],
-        zernike_surface_residuals=fit_data["zernike_surface_residuals"],
-        zernike_residual_surface=fit_data["zernike_residual_surface"],
-        zernike_residual_residuals=fit_data["zernike_residual_residuals"],
-        zpoly_fits=fit_data["zpoly_fits"],
-        zpoly_fits2=fit_data["zpoly_fits2"],
+        sphere_residuals_um=fit_data["sphere_residuals_um"],
+        zpbs_to_data_surface_um=fit_data["zpbs_to_data_surface_um"],
+        zpbs_to_data_residuals_um=fit_data["zpbs_to_data_residuals_um"],
+        zpbs_residual_surface_um=fit_data["zpbs_residual_surface_um"],
+        zpbs_residual_residuals_um=fit_data["zpbs_residual_residuals_um"],
+        zpbs_residual_coefficients_um=fit_data["zpbs_residual_coefficients_um"],
         x0_fit=fit_data["x0_fit"],
         y0_fit=fit_data["y0_fit"],
         z0_fit=fit_data["z0_fit"],
@@ -365,14 +411,14 @@ def build_fit_artifacts(
         prefit_best_radius_um=fit_data["prefit_best_radius_um"],
         sphere_fit_mode=fit_data["sphere_fit_mode"],
         center_weight=fit_data["center_weight"],
-        sphere_sse=fit_data["sphere_sse"],
-        sphere_rms=fit_data["sphere_rms"],
-        surface_zernike_sse=fit_data["surface_zernike_sse"],
-        surface_zernike_rms=fit_data["surface_zernike_rms"],
-        surface_zernike_cond=fit_data["surface_zernike_cond"],
-        sphere_residual_zernike_sse=fit_data["sphere_residual_zernike_sse"],
-        sphere_residual_zernike_rms=fit_data["sphere_residual_zernike_rms"],
-        sphere_residual_zernike_cond=fit_data["sphere_residual_zernike_cond"],
+        sphere_sse_um2=fit_data["sphere_sse_um2"],
+        sphere_mae_um=fit_data["sphere_mae_um"],
+        sphere_rms_um=fit_data["sphere_rms_um"],
+        zpbs_residual_sse_um2=fit_data["zpbs_residual_sse_um2"],
+        zpbs_residual_mae_um=fit_data["zpbs_residual_mae_um"],
+        zpbs_residual_rms_um=fit_data["zpbs_residual_rms_um"],
+        zpbs_residual_cond=fit_data["zpbs_residual_cond"],
+        zpbs_residual_on_axis_m0_um=fit_data["zpbs_residual_on_axis_m0_um"],
         observed_aperture_radius_um=fit_data["observed_aperture_radius_um"],
         norm_radius_um=fit_data["norm_radius_um"],
         target_vertex_x_um=fit_data["target_vertex_x_um"],
@@ -382,8 +428,9 @@ def build_fit_artifacts(
         reference_vertex_y_um=fit_data["reference_vertex_y_um"],
         reference_vertex_z_um=fit_data["reference_vertex_z_um"],
         vertex_mismatch_z_um=fit_data["vertex_mismatch_z_um"],
-        vertex_um=fit_data["zv"],
-        vertex_residual_um=fit_data["zv2"],
+        vertex_um=fit_data["vertex_fit_um"],
+        sphere_vertex_residual_um=fit_data["sphere_vertex_residual_um"],
+        vertex_residual_um=fit_data["vertex_residual_um"],
         method=fit_data["method"],
         n_modes=fit_data["n_modes"],
         roc_mode=roc_mode,

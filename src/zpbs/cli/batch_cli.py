@@ -46,19 +46,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=Path("batch_outputs"),
         help="Root directory for batch runs. Each run is written into a separate folder.",
     )
-    parser.add_argument("--run-name", default=None, help="Optional run folder / HDF5 group name. Defaults to a timestamp.")
+    parser.add_argument(
+        "--run-name", default=None, help="Optional run folder / HDF5 group name. Defaults to a timestamp."
+    )
     parser.add_argument("--recursive", action="store_true", help="Search recursively under input-dir.")
     parser.add_argument(
         "--roc-mode",
-        choices=("fit-per-file", "fixed", "average-best-fit"),
+        choices=("fit-per-file", "average-best-fit"),
         default="fit-per-file",
-        help="How to choose the reference radius of curvature for the batch.",
+        help="How to choose the reference radius of curvature for the batch. Use --fixed-roc-um for a fixed ROC.",
     )
     parser.add_argument(
         "--fixed-roc-um",
         type=float,
         default=None,
-        help="Fixed radius of curvature in micrometers for --roc-mode fixed.",
+        help="Fixed radius of curvature in micrometers. Supplying this selects fixed ROC mode.",
     )
     parser.add_argument(
         "--sphere-fit-mode",
@@ -77,7 +79,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "proportionally toward the center."
         ),
     )
-    parser.add_argument("--h5-path", type=Path, default=None, help="Optional HDF5 file that stores all runs together under separate run groups.")
+    parser.add_argument(
+        "--h5-path",
+        type=Path,
+        default=None,
+        help="Optional HDF5 file that stores all runs together under separate run groups.",
+    )
     parser.add_argument("--n-modes", type=int, default=45, help="Number of Zernike modes to fit. Default: %(default)s")
     parser.add_argument("--rcond", type=float, default=None, help="Least-squares rcond override for lstsq mode.")
     parser.add_argument(
@@ -112,8 +119,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable Zernike coefficient rounding and keep full-precision coefficients.",
     )
     parser.add_argument("--limit", type=int, default=None, help="Optional cap on number of files processed.")
-    parser.add_argument("--fail-fast", action="store_true", help="Stop on the first processing error instead of writing a failure report.")
-    parser.add_argument("--qa-report", action="store_true", help="Write an HTML QA gallery with compact radial-profile thumbnails for each fitted file.")
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop on the first processing error instead of writing a failure report.",
+    )
+    parser.add_argument(
+        "--qa-report",
+        action="store_true",
+        help="Write an HTML QA gallery with compact radial-profile thumbnails for each fitted file.",
+    )
     parser.set_defaults(round_radii_um=True)
     return parser
 
@@ -128,10 +143,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"Input directory does not exist: {input_dir}")
     if not 1 <= args.n_modes <= 45:
         parser.error("--n-modes must be between 1 and 45.")
-    if args.roc_mode == "fixed" and args.fixed_roc_um is None:
-        parser.error("--fixed-roc-um is required when --roc-mode fixed is selected.")
     if args.fixed_roc_um is not None and args.fixed_roc_um <= 0:
         parser.error("--fixed-roc-um must be positive.")
+    if args.fixed_roc_um is not None:
+        if args.roc_mode != "fit-per-file":
+            parser.error("--fixed-roc-um cannot be combined with --roc-mode average-best-fit.")
+        args.roc_mode = "fixed"
     try:
         validate_center_weight(args.center_weight)
         validate_sphere_reference_configuration(roc_mode=args.roc_mode, sphere_fit_mode=args.sphere_fit_mode)
@@ -257,7 +274,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.round_radii_um
             else per_surf_id
         )
-        files_to_process = [item for item in surviving_inputs if item.metadata.surf_id in normalization_radius_by_surf_id]
+        files_to_process = [
+            item for item in surviving_inputs if item.metadata.surf_id in normalization_radius_by_surf_id
+        ]
         if not files_to_process:
             write_csv(run_dir / "batch_failures.csv", failures)
             print("No files survived the normalization-radius prefit stage.", file=sys.stderr)
@@ -277,7 +296,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             reference_radius_um = common_radius_by_surf_id.get(metadata.surf_id, common_radius_um)
         normalization_radius_um = (
-            normalization_radius_by_surf_id.get(metadata.surf_id) if args.normalization_mode == "common-per-surf-id" else None
+            normalization_radius_by_surf_id.get(metadata.surf_id)
+            if args.normalization_mode == "common-per-surf-id"
+            else None
         )
 
         try:
@@ -322,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     write_json(
         run_dir / "run_manifest.json",
         {
+            "summary_schema_version": 2,
             "run_name": run_name,
             "input_dir": str(input_dir),
             "glob": args.glob,
@@ -365,7 +387,9 @@ def main(argv: list[str] | None = None) -> int:
                 "normalization_mode": args.normalization_mode,
                 "fixed_roc_um": args.fixed_roc_um,
                 "common_reference_radius_um": common_radius_um,
-                "common_reference_radius_by_surf_id": json.dumps(common_radius_by_surf_id) if common_radius_by_surf_id else None,
+                "common_reference_radius_by_surf_id": json.dumps(common_radius_by_surf_id)
+                if common_radius_by_surf_id
+                else None,
                 "n_modes": args.n_modes,
                 "rcond": args.rcond,
                 "round_radii_um": args.round_radii_um,
@@ -376,7 +400,13 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.qa_report and artifacts:
-        qa_path = write_qa_report(run_dir, artifacts, summary_report_path=summary_report_path, analysis_date=analysis_date)
+        qa_path = write_qa_report(
+            run_dir, artifacts, summary_report_path=summary_report_path, analysis_date=analysis_date
+        )
         print(f"qa report: {qa_path}")
 
     return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

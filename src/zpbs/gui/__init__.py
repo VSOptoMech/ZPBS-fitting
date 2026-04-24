@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sys
+
+from PyQt5.QtWidgets import QApplication
+
 from ..io.remap import prepare_summary_row_for_preview
 from ..io.workbook import parse_inline_xlsx_rows
 from .canvases import FitPreviewCanvas, NumericTableWidgetItem, OverviewPlotCanvas, SubsetPlotCanvas
-from .main import main
 from .support import (
     NORMALIZATION_MODE_LABELS,
     ROC_MODE_LABELS,
@@ -16,6 +19,16 @@ from .support import (
     snapped_axis_limits,
 )
 from .window import BatchFitWindow
+
+
+def main() -> int:
+    """Launch the maintained Qt GUI."""
+    app = QApplication(sys.argv)
+    app.setApplicationName("Batch Fit Launcher")
+    window = BatchFitWindow()
+    window.show()
+    return app.exec_()
+
 
 __all__ = [
     "BatchFitWindow",

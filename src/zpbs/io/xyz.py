@@ -139,9 +139,7 @@ def collapse_identical_initial_inputs(files: list[Path]) -> list[ProcessingInput
             )
         payloads = {file_path.read_bytes() for file_path, _ in members}
         if len(payloads) != 1:
-            raise ValueError(
-                f"Cannot collapse {surf_id} initial states because the raw *I payloads are not identical."
-            )
+            raise ValueError(f"Cannot collapse {surf_id} initial states because the raw *I payloads are not identical.")
 
         representative_file, representative_metadata = min(
             members,

@@ -34,13 +34,12 @@ class FitArtifacts:
     rho: Any
     phi: Any
     rho_norm: Any
-    sphere_residuals: Any
-    zernike_surface: Any
-    zernike_surface_residuals: Any
-    zernike_residual_surface: Any
-    zernike_residual_residuals: Any
-    zpoly_fits: Any
-    zpoly_fits2: Any
+    sphere_residuals_um: Any
+    zpbs_to_data_surface_um: Any
+    zpbs_to_data_residuals_um: Any
+    zpbs_residual_surface_um: Any
+    zpbs_residual_residuals_um: Any
+    zpbs_residual_coefficients_um: Any
     x0_fit: float
     y0_fit: float
     z0_fit: float
@@ -49,14 +48,14 @@ class FitArtifacts:
     prefit_best_radius_um: float | None
     sphere_fit_mode: str
     center_weight: float
-    sphere_sse: float
-    sphere_rms: float
-    surface_zernike_sse: float
-    surface_zernike_rms: float
-    surface_zernike_cond: float
-    sphere_residual_zernike_sse: float
-    sphere_residual_zernike_rms: float
-    sphere_residual_zernike_cond: float
+    sphere_sse_um2: float
+    sphere_mae_um: float
+    sphere_rms_um: float
+    zpbs_residual_sse_um2: float
+    zpbs_residual_mae_um: float
+    zpbs_residual_rms_um: float
+    zpbs_residual_cond: float
+    zpbs_residual_on_axis_m0_um: float
     observed_aperture_radius_um: float
     norm_radius_um: float
     target_vertex_x_um: float
@@ -67,6 +66,7 @@ class FitArtifacts:
     reference_vertex_z_um: float
     vertex_mismatch_z_um: float
     vertex_um: float
+    sphere_vertex_residual_um: float
     vertex_residual_um: float
     method: str
     n_modes: int
@@ -77,6 +77,62 @@ class FitArtifacts:
     common_normalization_radius_um: float | None
     round_radii_um: bool
     zernike_coeff_sigfigs: int | None
+
+    @property
+    def sphere_residuals(self) -> Any:
+        return self.sphere_residuals_um
+
+    @property
+    def zernike_surface(self) -> Any:
+        return self.zpbs_to_data_surface_um
+
+    @property
+    def zernike_surface_residuals(self) -> Any:
+        return self.zpbs_to_data_residuals_um
+
+    @property
+    def zernike_residual_surface(self) -> Any:
+        return self.zpbs_residual_surface_um
+
+    @property
+    def zernike_residual_residuals(self) -> Any:
+        return self.zpbs_residual_residuals_um
+
+    @property
+    def zpoly_fits(self) -> Any:
+        return self.zpbs_residual_coefficients_um
+
+    @property
+    def zpoly_fits2(self) -> Any:
+        return self.zpbs_residual_coefficients_um
+
+    @property
+    def sphere_sse(self) -> float:
+        return self.sphere_sse_um2
+
+    @property
+    def sphere_mae(self) -> float:
+        return self.sphere_mae_um
+
+    @property
+    def sphere_rms(self) -> float:
+        return self.sphere_rms_um
+
+    @property
+    def sphere_residual_zernike_sse(self) -> float:
+        return self.zpbs_residual_sse_um2
+
+    @property
+    def sphere_residual_zernike_mae(self) -> float:
+        return self.zpbs_residual_mae_um
+
+    @property
+    def sphere_residual_zernike_rms(self) -> float:
+        return self.zpbs_residual_rms_um
+
+    @property
+    def sphere_residual_zernike_cond(self) -> float:
+        return self.zpbs_residual_cond
 
 
 @dataclass(frozen=True)

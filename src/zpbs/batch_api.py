@@ -1,4 +1,4 @@
-"""Stable maintained batch-facing API re-exported by the root wrapper."""
+"""Stable maintained batch-facing API."""
 
 from __future__ import annotations
 
@@ -38,7 +38,13 @@ from zpbs.fit.sphere_reference import (
 )
 from zpbs.io.xyz import collapse_identical_initial_inputs, load_xyz_point_cloud, parse_surface_metadata
 from zpbs.models import FitArtifacts, ProcessingInput, SurfaceMetadata
-from zpbs.pipeline.surface_fit import build_fit_artifacts, precompute_best_radii, precompute_common_normalization_radii_by_surf_id, run_fit_pipeline
+from zpbs.pipeline.surface_fit import (
+    build_fit_artifacts,
+    precompute_best_radii,
+    precompute_common_normalization_radii_by_surf_id,
+    run_fit_pipeline,
+    zpbs_residual_on_axis_m0_um,
+)
 from zpbs.reporting.batch_reports import (
     artifacts_to_summary_row,
     excel_column_name,
@@ -97,6 +103,7 @@ __all__ = [
     "select_vertex_target",
     "sphere_profile_z",
     "sphere_reference_vertex",
+    "zpbs_residual_on_axis_m0_um",
     "uses_posterior_sign_convention",
     "validate_center_weight",
     "validate_sphere_reference_configuration",

@@ -88,11 +88,7 @@ def infer_original_source_root(
     if manifest_input_dir is not None:
         return manifest_input_dir
 
-    source_paths = [
-        Path(row["source_file"])
-        for row in rows
-        if row.get("source_file", "").strip()
-    ]
+    source_paths = [Path(row["source_file"]) for row in rows if row.get("source_file", "").strip()]
     absolute_paths = [path for path in source_paths if path.is_absolute()]
     if not absolute_paths:
         return None

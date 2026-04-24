@@ -101,27 +101,92 @@ class SurfaceFitResults:
     z0_fit: float
     r_fit: float
     best_sphere_resid: np.ndarray
-    sum_square_resid: float
-    sphere_rms: float
+    sphere_sse_um2: float
+    sphere_mae_um: float
+    sphere_rms_um: float
     rho: np.ndarray
     phi: np.ndarray
     rho_norm: np.ndarray
     pol_loci: np.ndarray
     zv: float
     zv2: float
-    zpoly_fits: np.ndarray
-    zpoly_fits2: np.ndarray
-    zpoly_surf: np.ndarray
-    zpoly_surf2: np.ndarray
-    zpoly_surf_resid: np.ndarray
-    zpoly_surf_resid2: np.ndarray
-    zpoly_surf_sse: float
-    zpoly_surf_sse2: float
-    zpoly_surf_rms: float
-    zpoly_surf_rms2: float
-    zpoly_surf_cond: float
-    zpoly_surf_cond2: float
+    zpbs_residual_coefficients_um: np.ndarray
+    zpbs_residual_surface_um: np.ndarray
+    zpbs_residual_residuals_um: np.ndarray
+    zpbs_residual_sse_um2: float
+    zpbs_residual_mae_um: float
+    zpbs_residual_rms_um: float
+    zpbs_residual_cond: float
+    zpbs_to_data_surface_um: np.ndarray
+    zpbs_to_data_residuals_um: np.ndarray
+    zpbs_to_data_sse_um2: float
+    zpbs_to_data_mae_um: float
+    zpbs_to_data_rms_um: float
     zernike_method: str
+
+    @property
+    def sum_square_resid(self) -> float:
+        return self.sphere_sse_um2
+
+    @property
+    def sphere_rms(self) -> float:
+        return self.sphere_rms_um
+
+    @property
+    def zpoly_fits(self) -> np.ndarray:
+        return self.zpbs_residual_coefficients_um
+
+    @property
+    def zpoly_fits2(self) -> np.ndarray:
+        return self.zpbs_residual_coefficients_um
+
+    @property
+    def zpoly_surf2(self) -> np.ndarray:
+        return self.zpbs_residual_surface_um
+
+    @property
+    def zpoly_surf_resid2(self) -> np.ndarray:
+        return self.zpbs_residual_residuals_um
+
+    @property
+    def zpoly_surf_sse2(self) -> float:
+        return self.zpbs_residual_sse_um2
+
+    @property
+    def zpoly_surf_rms2(self) -> float:
+        return self.zpbs_residual_rms_um
+
+    @property
+    def zpoly_surf_cond2(self) -> float:
+        return self.zpbs_residual_cond
+
+    @property
+    def zpoly_surf(self) -> np.ndarray:
+        return self.zpbs_to_data_surface_um
+
+    @property
+    def zpoly_surf_resid(self) -> np.ndarray:
+        return self.zpbs_to_data_residuals_um
+
+    @property
+    def zpoly_surf_sse(self) -> float:
+        return self.zpbs_to_data_sse_um2
+
+    @property
+    def zpoly_surf_rms(self) -> float:
+        return self.zpbs_to_data_rms_um
+
+    @property
+    def zpoly_surf_cond(self) -> float:
+        return self.zpbs_residual_cond
+
+
+def _sphere_surface_from_reference(
+    rho: np.ndarray, *, z0_fit: float, radius_um: float, branch_sign: float
+) -> np.ndarray:
+    """Evaluate the fitted sphere branch in the measured z frame."""
+    term = np.sqrt(np.clip(radius_um**2 - rho**2, 0.0, None))
+    return z0_fit + (float(branch_sign) * term)
 
 
 def _clean_field(value: str) -> str:
@@ -210,9 +275,7 @@ def load_keyence_height_csv(
     z_unit = str(metadata["Unit"])
 
     if len(matrix_rows) < vertical:
-        raise ValueError(
-            f"Height matrix has fewer rows ({len(matrix_rows)}) than expected ({vertical})."
-        )
+        raise ValueError(f"Height matrix has fewer rows ({len(matrix_rows)}) than expected ({vertical}).")
     if len(matrix_rows) > vertical:
         matrix_rows = matrix_rows[:vertical]
 
@@ -272,17 +335,13 @@ def load_keyence_height_csv(
     )
 
 
-def fit_sphere(
-    x: np.ndarray, y: np.ndarray, z: np.ndarray
-) -> tuple[float, float, float, float, np.ndarray]:
+def fit_sphere(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> tuple[float, float, float, float, np.ndarray]:
     """Fit a sphere to 3D points and return center, radius, and signed residuals."""
     x = np.asarray(x)
     y = np.asarray(y)
     z = np.asarray(z)
 
-    def sphere_residuals(
-        params: np.ndarray, x_val: np.ndarray, y_val: np.ndarray, z_val: np.ndarray
-    ) -> np.ndarray:
+    def sphere_residuals(params: np.ndarray, x_val: np.ndarray, y_val: np.ndarray, z_val: np.ndarray) -> np.ndarray:
         x0, y0, z0, r = params
         distances = np.sqrt((x_val - x0) ** 2 + (y_val - y0) ** 2 + (z_val - z0) ** 2)
         return distances - r
@@ -673,8 +732,9 @@ def fit_surface_with_zernike(
     if flip_posterior_sign and uses_posterior_sign_convention(surf_id):
         best_sphere_resid = -best_sphere_resid
 
-    sum_square_resid = float(np.sum(np.square(best_sphere_resid)))
-    sphere_rms = float(np.sqrt(np.mean(np.square(best_sphere_resid))))
+    sphere_sse_um2 = float(np.sum(np.square(best_sphere_resid)))
+    sphere_mae_um = float(np.mean(np.abs(best_sphere_resid)))
+    sphere_rms_um = float(np.sqrt(np.mean(np.square(best_sphere_resid))))
     rho, phi = cartesian_to_polar(x - x0_fit, y - y0_fit)
     rho_max = np.max(rho)
     if rho_max <= 0:
@@ -690,23 +750,13 @@ def fit_surface_with_zernike(
         raise ValueError(
             f"Unsupported Zernike fitting method in maintained code: {method!r}. Only 'lstsq' is supported."
         )
-    (
-        zpoly_fits_lin,
-        zpoly_surf,
-        zpoly_surf_resid,
-        zpoly_surf_rms,
-        zpoly_surf_cond,
-    ) = fit_zernike_lstsq(rho_norm, phi, z, n_modes=n_modes, rcond=rcond)
-    zpoly_fits = _pad_coeffs_to_45(zpoly_fits_lin)
-    zpoly_surf_sse = float(np.sum(zpoly_surf_resid**2))
-
     zv2 = float(best_sphere_resid[idx_center])
     (
-        zpoly_fits2_lin,
-        zpoly_surf2,
-        zpoly_surf_resid2,
-        zpoly_surf_rms2,
-        zpoly_surf_cond2,
+        zpbs_residual_coefficients_lin,
+        _zpbs_residual_surface_direct,
+        _zpbs_residual_residuals_direct,
+        _zpbs_residual_rms_direct,
+        zpbs_residual_cond,
     ) = fit_zernike_lstsq(
         rho_norm,
         phi,
@@ -714,8 +764,26 @@ def fit_surface_with_zernike(
         n_modes=n_modes,
         rcond=rcond,
     )
-    zpoly_fits2 = _pad_coeffs_to_45(zpoly_fits2_lin)
-    zpoly_surf_sse2 = float(np.sum(zpoly_surf_resid2**2))
+    zpbs_residual_coefficients_um = _pad_coeffs_to_45(zpbs_residual_coefficients_lin)
+    zpbs_residual_surface_um = zernike_polar(pol_loci, *zpbs_residual_coefficients_um)
+    zpbs_residual_residuals_um = best_sphere_resid - zpbs_residual_surface_um
+    zpbs_residual_sse_um2 = float(np.sum(zpbs_residual_residuals_um**2))
+    zpbs_residual_mae_um = float(np.mean(np.abs(zpbs_residual_residuals_um)))
+    zpbs_residual_rms_um = float(np.sqrt(np.mean(zpbs_residual_residuals_um**2)))
+
+    branch_sign = 1.0 if zv >= float(z0_fit) else -1.0
+    sphere_surface_um = _sphere_surface_from_reference(
+        rho,
+        z0_fit=float(z0_fit),
+        radius_um=float(r_fit),
+        branch_sign=branch_sign,
+    )
+    residual_sign = -1.0 if uses_posterior_sign_convention(surf_id) else 1.0
+    zpbs_to_data_surface_um = sphere_surface_um + (residual_sign * zpbs_residual_surface_um)
+    zpbs_to_data_residuals_um = z - zpbs_to_data_surface_um
+    zpbs_to_data_sse_um2 = float(np.sum(zpbs_to_data_residuals_um**2))
+    zpbs_to_data_mae_um = float(np.mean(np.abs(zpbs_to_data_residuals_um)))
+    zpbs_to_data_rms_um = float(np.sqrt(np.mean(zpbs_to_data_residuals_um**2)))
 
     return SurfaceFitResults(
         x0_fit=float(x0_fit),
@@ -723,26 +791,27 @@ def fit_surface_with_zernike(
         z0_fit=float(z0_fit),
         r_fit=float(r_fit),
         best_sphere_resid=best_sphere_resid,
-        sum_square_resid=sum_square_resid,
-        sphere_rms=sphere_rms,
+        sphere_sse_um2=sphere_sse_um2,
+        sphere_mae_um=sphere_mae_um,
+        sphere_rms_um=sphere_rms_um,
         rho=rho,
         phi=phi,
         rho_norm=rho_norm,
         pol_loci=pol_loci,
         zv=zv,
         zv2=zv2,
-        zpoly_fits=zpoly_fits,
-        zpoly_fits2=zpoly_fits2,
-        zpoly_surf=zpoly_surf,
-        zpoly_surf2=zpoly_surf2,
-        zpoly_surf_resid=zpoly_surf_resid,
-        zpoly_surf_resid2=zpoly_surf_resid2,
-        zpoly_surf_sse=zpoly_surf_sse,
-        zpoly_surf_sse2=zpoly_surf_sse2,
-        zpoly_surf_rms=zpoly_surf_rms,
-        zpoly_surf_rms2=zpoly_surf_rms2,
-        zpoly_surf_cond=zpoly_surf_cond,
-        zpoly_surf_cond2=zpoly_surf_cond2,
+        zpbs_residual_coefficients_um=zpbs_residual_coefficients_um,
+        zpbs_residual_surface_um=zpbs_residual_surface_um,
+        zpbs_residual_residuals_um=zpbs_residual_residuals_um,
+        zpbs_residual_sse_um2=zpbs_residual_sse_um2,
+        zpbs_residual_mae_um=zpbs_residual_mae_um,
+        zpbs_residual_rms_um=zpbs_residual_rms_um,
+        zpbs_residual_cond=zpbs_residual_cond,
+        zpbs_to_data_surface_um=zpbs_to_data_surface_um,
+        zpbs_to_data_residuals_um=zpbs_to_data_residuals_um,
+        zpbs_to_data_sse_um2=zpbs_to_data_sse_um2,
+        zpbs_to_data_mae_um=zpbs_to_data_mae_um,
+        zpbs_to_data_rms_um=zpbs_to_data_rms_um,
         zernike_method=method_key,
     )
 
@@ -813,10 +882,7 @@ def visualize_zernike_slice(
         height=720,
         xaxis_title="Radial Distance (um)",
         yaxis_title="Height Residual (um)",
-        title=(
-            f"Zernike Surface Slice at φ = {slice_angle:.3f} rad "
-            f"(±{np.degrees(angular_tolerance):.1f}°)"
-        ),
+        title=(f"Zernike Surface Slice at φ = {slice_angle:.3f} rad (±{np.degrees(angular_tolerance):.1f}°)"),
         showlegend=True,
         hovermode="closest",
         template="plotly_white",
@@ -831,7 +897,7 @@ def export_zernike_coefficients_csv(
     fea_id: str,
     surf_id: str,
     tension_mn: float | str,
-    base_sphere_radius_um: float,
+    base_sphere_roc_um: float,
     vertex_um: float,
     vertex_residual_um: float,
     norm_radius_um: float,
@@ -848,7 +914,7 @@ def export_zernike_coefficients_csv(
             fea_id=fea_id,
             surf_id=surf_id,
             tension_mn=tension_mn,
-            base_sphere_radius_um=base_sphere_radius_um,
+            base_sphere_roc_um=base_sphere_roc_um,
             vertex_um=vertex_um,
             vertex_residual_um=vertex_residual_um,
             norm_radius_um=norm_radius_um,
@@ -880,7 +946,7 @@ def build_zernike_coefficients_rows(
     fea_id: str,
     surf_id: str,
     tension_mn: float | str,
-    base_sphere_radius_um: float,
+    base_sphere_roc_um: float,
     vertex_um: float,
     vertex_residual_um: float,
     norm_radius_um: float,
@@ -892,7 +958,7 @@ def build_zernike_coefficients_rows(
         ("FEA", fea_id),
         ("Surface", surf_id),
         ("Tension (mN)", str(tension_mn)),
-        ("Base sphere radius (mm)", base_sphere_radius_um / 1000.0),
+        ("Base sphere ROC (mm)", base_sphere_roc_um / 1000.0),
         ("Vertex (mm)", vertex_um / 1000.0),
         ("Vertex residual (mm)", vertex_residual_um / 1000.0),
         ("No. ZP terms", N_ZERNIKE_TERMS),

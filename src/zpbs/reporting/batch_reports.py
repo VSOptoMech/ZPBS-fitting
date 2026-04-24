@@ -9,9 +9,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from azp_csv_pipeline import build_zernike_coefficients_rows
+import numpy as np
+
+from zpbs.azp_csv_pipeline import build_zernike_coefficients_rows
 from zpbs.common import (
     FOCUS_SURF_IDS,
+    format_mae_rms_display,
     format_processed_label,
     format_tension,
     is_focus_surface_family,
@@ -25,50 +28,21 @@ from zpbs.models import FitArtifacts
 def artifacts_to_summary_row(artifacts: FitArtifacts) -> dict[str, Any]:
     """Flatten fit artifacts for batch summary CSV output."""
     return {
-        "run_name": artifacts.run_name,
-        "roc_mode": artifacts.roc_mode,
-        "sphere_fit_mode": artifacts.sphere_fit_mode,
-        "center_weight": artifacts.center_weight,
-        "normalization_mode": artifacts.normalization_mode,
-        "round_radii_um": artifacts.round_radii_um,
-        "zernike_coeff_sigfigs": artifacts.zernike_coeff_sigfigs,
         "source_file": str(artifacts.source_file),
-        "source_force_id": artifacts.source_metadata.force_id,
-        "design_token": artifacts.metadata.design_token,
-        "design_id": artifacts.metadata.design_id,
-        "fea_id": artifacts.metadata.fea_id,
+        "output_coefficients_csv": str(artifacts.output_coefficients_csv),
         "force_id": artifacts.metadata.force_id,
         "surf_id": artifacts.metadata.surf_id,
         "surface_token": artifacts.metadata.surface_token,
-        "points_used": artifacts.points_used,
-        "n_modes": artifacts.n_modes,
-        "prefit_best_radius_um": artifacts.prefit_best_radius_um,
-        "fitted_sphere_radius_um": artifacts.fitted_sphere_radius_um,
         "applied_reference_radius_um": artifacts.applied_reference_radius_um,
-        "common_reference_radius_um": artifacts.common_reference_radius_um,
-        "observed_aperture_radius_um": artifacts.observed_aperture_radius_um,
         "applied_normalization_radius_um": artifacts.norm_radius_um,
-        "common_normalization_radius_um": artifacts.common_normalization_radius_um,
-        "target_vertex_x_um": artifacts.target_vertex_x_um,
-        "target_vertex_y_um": artifacts.target_vertex_y_um,
-        "target_vertex_z_um": artifacts.target_vertex_z_um,
-        "reference_vertex_x_um": artifacts.reference_vertex_x_um,
-        "reference_vertex_y_um": artifacts.reference_vertex_y_um,
-        "reference_vertex_z_um": artifacts.reference_vertex_z_um,
+        "observed_aperture_radius_um": artifacts.observed_aperture_radius_um,
+        "sphere_rms_um": artifacts.sphere_rms_um,
+        "sphere_mae_um": artifacts.sphere_mae_um,
+        "zpbs_residual_rms_um": artifacts.zpbs_residual_rms_um,
+        "zpbs_residual_cond": artifacts.zpbs_residual_cond,
         "vertex_mismatch_z_um": artifacts.vertex_mismatch_z_um,
-        "sphere_sse": artifacts.sphere_sse,
-        "sphere_rms": artifacts.sphere_rms,
-        "surface_zernike_sse": artifacts.surface_zernike_sse,
-        "surface_zernike_rms": artifacts.surface_zernike_rms,
-        "surface_zernike_cond": artifacts.surface_zernike_cond,
-        "sphere_residual_zernike_sse": artifacts.sphere_residual_zernike_sse,
-        "sphere_residual_zernike_rms": artifacts.sphere_residual_zernike_rms,
-        "sphere_residual_zernike_cond": artifacts.sphere_residual_zernike_cond,
-        "norm_radius_um": artifacts.norm_radius_um,
         "vertex_um": artifacts.vertex_um,
         "vertex_residual_um": artifacts.vertex_residual_um,
-        "output_coefficients_csv": str(artifacts.output_coefficients_csv),
-        "method": artifacts.method,
     }
 
 
@@ -95,19 +69,23 @@ def write_batch_zp_report(file_path: Path, artifacts: list[FitArtifacts]) -> Pat
     columns: list[tuple[str, list[tuple[str, object]]]] = []
 
     for item in artifacts:
-        export_coefficients_um = item.zpoly_fits2.copy()
-        export_coefficients_um[0] = export_coefficients_um[0] - item.vertex_residual_um
+        export_coefficients_um = item.zpbs_residual_coefficients_um.copy()
+        export_coefficients_um[0] = export_coefficients_um[0] - item.sphere_vertex_residual_um
         if item.zernike_coeff_sigfigs is not None:
-            import numpy as np
-
             export_coefficients_um = round_sigfigs_array(export_coefficients_um, item.zernike_coeff_sigfigs, np=np)
-        export_coefficients_mm = (-1.0) * export_coefficients_um / 1000.0
+        # Keep the historical anterior sign and invert posterior surfaces once more so
+        # the batch-wide report matches the per-file Zemax-facing CSV export.
+        export_sign = 1.0 if uses_posterior_sign_convention(item.metadata.surf_id) else -1.0
+        export_coefficients_mm = export_sign * export_coefficients_um / 1000.0
+        signed_roc_um = (1.0 if float(item.reference_vertex_z_um) >= float(item.z0_fit) else -1.0) * float(
+            item.applied_reference_radius_um
+        )
         rows = build_zernike_coefficients_rows(
             design_id=item.metadata.design_id,
             fea_id=item.metadata.fea_id,
             surf_id=item.metadata.surf_id,
             tension_mn=format_tension(item.metadata.force_id),
-            base_sphere_radius_um=item.applied_reference_radius_um,
+            base_sphere_roc_um=signed_roc_um,
             vertex_um=item.vertex_um,
             vertex_residual_um=item.vertex_residual_um,
             norm_radius_um=item.norm_radius_um,
@@ -118,14 +96,17 @@ def write_batch_zp_report(file_path: Path, artifacts: list[FitArtifacts]) -> Pat
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with file_path.open("w", newline="") as handle:
         writer = csv.writer(handle, dialect="excel")
-        writer.writerow(["Field", *[label for label, _ in columns]])
         if not columns:
             writer.writerow(["message", "no rows"])
             return file_path
 
-        row_names = [name for name, _ in columns[0][1]]
-        for row_index, row_name in enumerate(row_names):
-            writer.writerow([row_name, *[rows[row_index][1] for _, rows in columns]])
+        row_count = len(columns[0][1])
+        for row_index in range(row_count):
+            output_row: list[object] = []
+            for _label, rows in columns:
+                row_name, row_value = rows[row_index]
+                output_row.extend([row_name, row_value])
+            writer.writerow(output_row)
     return file_path
 
 
@@ -270,6 +251,16 @@ def write_batch_h5(h5_path: Path, *, run_name: str, config: dict[str, Any], arti
             file_group.attrs["reference_vertex_y_um"] = item.reference_vertex_y_um
             file_group.attrs["reference_vertex_z_um"] = item.reference_vertex_z_um
             file_group.attrs["vertex_mismatch_z_um"] = item.vertex_mismatch_z_um
+            file_group.attrs["vertex_um"] = item.vertex_um
+            file_group.attrs["sphere_vertex_residual_um"] = item.sphere_vertex_residual_um
+            file_group.attrs["vertex_residual_um"] = item.vertex_residual_um
+            file_group.attrs["sphere_sse_um2"] = item.sphere_sse_um2
+            file_group.attrs["sphere_mae_um"] = item.sphere_mae_um
+            file_group.attrs["sphere_rms_um"] = item.sphere_rms_um
+            file_group.attrs["zpbs_residual_sse_um2"] = item.zpbs_residual_sse_um2
+            file_group.attrs["zpbs_residual_mae_um"] = item.zpbs_residual_mae_um
+            file_group.attrs["zpbs_residual_rms_um"] = item.zpbs_residual_rms_um
+            file_group.attrs["zpbs_residual_cond"] = item.zpbs_residual_cond
 
             file_group.create_dataset("x_um", data=item.x)
             file_group.create_dataset("y_um", data=item.y)
@@ -277,13 +268,12 @@ def write_batch_h5(h5_path: Path, *, run_name: str, config: dict[str, Any], arti
             file_group.create_dataset("rho_um", data=item.rho)
             file_group.create_dataset("phi_rad", data=item.phi)
             file_group.create_dataset("rho_norm", data=item.rho_norm)
-            file_group.create_dataset("sphere_residual_um", data=item.sphere_residuals)
-            file_group.create_dataset("zernike_surface_um", data=item.zernike_surface)
-            file_group.create_dataset("zernike_surface_residual_um", data=item.zernike_surface_residuals)
-            file_group.create_dataset("zernike_residual_surface_um", data=item.zernike_residual_surface)
-            file_group.create_dataset("zernike_residual_surface_residual_um", data=item.zernike_residual_residuals)
-            file_group.create_dataset("zernike_surface_coefficients", data=item.zpoly_fits)
-            file_group.create_dataset("zernike_residual_coefficients", data=item.zpoly_fits2)
+            file_group.create_dataset("sphere_residual_um", data=item.sphere_residuals_um)
+            file_group.create_dataset("zpbs_to_data_surface_um", data=item.zpbs_to_data_surface_um)
+            file_group.create_dataset("zpbs_to_data_residual_um", data=item.zpbs_to_data_residuals_um)
+            file_group.create_dataset("zpbs_residual_surface_um", data=item.zpbs_residual_surface_um)
+            file_group.create_dataset("zpbs_residual_residual_um", data=item.zpbs_residual_residuals_um)
+            file_group.create_dataset("zpbs_residual_coefficients_um", data=item.zpbs_residual_coefficients_um)
 
 
 def sphere_profile_z(rho: Any, *, z0_fit: float, radius_um: float, posterior_surface: bool, np: Any) -> Any:
@@ -345,17 +335,21 @@ def _build_overview_plot_series(artifacts: FitArtifacts, *, bins: int, np: Any) 
     )
     rho_meas, z_meas = radial_bin_profile(artifacts.rho, artifacts.z, bins=bins, np=np)
     rho_sphere, z_sphere = radial_bin_profile(artifacts.rho, sphere_surface, bins=bins, np=np)
-    rho_zernike, z_zernike = radial_bin_profile(artifacts.rho, artifacts.zernike_surface, bins=bins, np=np)
-    rho_sphere_resid, z_sphere_resid = radial_bin_profile(artifacts.rho, artifacts.sphere_residuals, bins=bins, np=np)
-    rho_resid, z_resid = radial_bin_profile(artifacts.rho, artifacts.zernike_surface_residuals, bins=bins, np=np)
+    rho_zpbs_to_data, z_zpbs_to_data = radial_bin_profile(
+        artifacts.rho, artifacts.zpbs_to_data_surface_um, bins=bins, np=np
+    )
+    rho_sphere_resid, z_sphere_resid = radial_bin_profile(
+        artifacts.rho, artifacts.sphere_residuals_um, bins=bins, np=np
+    )
+    rho_resid, z_resid = radial_bin_profile(artifacts.rho, artifacts.zpbs_to_data_residuals_um, bins=bins, np=np)
     x_max = float(max(np.max(artifacts.rho), artifacts.observed_aperture_radius_um, 0.0))
     return {
         "rho_meas": rho_meas,
         "z_meas": z_meas,
         "rho_sphere": rho_sphere,
         "z_sphere": z_sphere,
-        "rho_zernike": rho_zernike,
-        "z_zernike": z_zernike,
+        "rho_zpbs_to_data": rho_zpbs_to_data,
+        "z_zpbs_to_data": z_zpbs_to_data,
         "rho_sphere_resid": rho_sphere_resid,
         "z_sphere_resid": z_sphere_resid,
         "rho_resid": rho_resid,
@@ -386,20 +380,31 @@ def render_overview_plot(
         ax_profile, ax_resid = axes
         ax_profile.plot(series["rho_meas"], series["z_meas"], color="#1f2937", linewidth=1.1, label="measured")
         ax_profile.plot(series["rho_sphere"], series["z_sphere"], color="#2563eb", linewidth=0.9, label="sphere")
-        ax_profile.plot(series["rho_zernike"], series["z_zernike"], color="#dc2626", linewidth=0.9, label="zernike")
+        ax_profile.plot(
+            series["rho_zpbs_to_data"],
+            series["z_zpbs_to_data"],
+            color="#dc2626",
+            linewidth=0.9,
+            linestyle="--",
+            label="zpbs fit",
+        )
         ax_profile.set_ylabel("z (um)", fontsize=7)
         ax_profile.grid(True, alpha=0.2, linewidth=0.4)
         ax_profile.tick_params(labelsize=6, length=2)
         ax_profile.legend(loc="best", fontsize=6, frameon=False, ncol=3, handlelength=1.5, columnspacing=0.8)
         ax_profile.set_title(
-            f"{artifacts.metadata.surface_token}  sse={artifacts.sphere_sse:.2e}  rms={artifacts.surface_zernike_rms:.2e}",
+            (
+                f"{artifacts.metadata.surface_token}  sphere_rms="
+                f"{format_mae_rms_display(artifacts.sphere_rms_um, precision=3)}  "
+                f"zpbs_residual_cond={artifacts.zpbs_residual_cond:.2e}"
+            ),
             fontsize=7,
         )
 
         ax_resid.plot(series["rho_resid"], series["z_resid"], color="#059669", linewidth=0.9)
         ax_resid.axhline(0.0, color="#6b7280", linewidth=0.6, alpha=0.6)
         ax_resid.set_xlabel("rho (um)", fontsize=7)
-        ax_resid.set_ylabel("resid", fontsize=7)
+        ax_resid.set_ylabel("ZPBS Fit Resid. (um)", fontsize=7)
         ax_resid.grid(True, alpha=0.2, linewidth=0.4)
         ax_resid.tick_params(labelsize=6, length=2)
         compact_x_max = _thumbnail_x_limit_um(artifacts.rho, np=np)
@@ -415,7 +420,14 @@ def render_overview_plot(
 
     ax_profile.plot(series["rho_meas"], series["z_meas"], color="#111827", linewidth=1.5, label="Measured")
     ax_profile.plot(series["rho_sphere"], series["z_sphere"], color="#2563eb", linewidth=1.2, label="Sphere")
-    ax_profile.plot(series["rho_zernike"], series["z_zernike"], color="#dc2626", linewidth=1.2, label="Zernike")
+    ax_profile.plot(
+        series["rho_zpbs_to_data"],
+        series["z_zpbs_to_data"],
+        color="#dc2626",
+        linewidth=1.2,
+        linestyle="--",
+        label="ZPBS Fit",
+    )
     ax_profile.set_title(
         f"{artifacts.metadata.surface_token} | {artifacts.source_file.name}",
         fontsize=11,
@@ -427,8 +439,9 @@ def render_overview_plot(
         [
             f"Norm radius: {artifacts.norm_radius_um:.2f} um",
             f"Observed aperture: {artifacts.observed_aperture_radius_um:.2f} um",
-            f"Sphere SSE: {artifacts.sphere_sse:.2e}",
-            f"Residual RMS: {artifacts.sphere_residual_zernike_rms:.2e}",
+            f"Sphere RMS: {format_mae_rms_display(artifacts.sphere_rms_um, precision=3)} um",
+            f"ZPBS residual RMS: {format_mae_rms_display(artifacts.zpbs_residual_rms_um, precision=3)} um",
+            f"ZPBS residual cond: {artifacts.zpbs_residual_cond:.2e}",
             f"Vertex mismatch z: {artifacts.vertex_mismatch_z_um:.2e} um",
         ]
     )
@@ -454,7 +467,7 @@ def render_overview_plot(
     ax_resid.plot(series["rho_resid"], series["z_resid"], color="#059669", linewidth=1.2)
     ax_resid.axhline(0.0, color="#6b7280", linewidth=0.8, alpha=0.8)
     ax_resid.set_xlabel("rho (um)")
-    ax_resid.set_ylabel("Zernike Resid. (um)")
+    ax_resid.set_ylabel("ZPBS Fit Resid. (um)")
     ax_resid.grid(True, alpha=0.2)
 
     for axis in (ax_profile, ax_sphere_resid, ax_resid):
@@ -525,9 +538,9 @@ def write_qa_report(
                 "<tr>"
                 f"<td>{html.escape(file_label)}</td>"
                 f"<td>{html.escape(item.metadata.surface_token)}</td>"
-                f"<td>{item.sphere_sse:.3e}</td>"
-                f"<td>{item.surface_zernike_rms:.3e}</td>"
-                f"<td>{item.sphere_residual_zernike_rms:.3e}</td>"
+                f"<td>{format_mae_rms_display(item.sphere_rms_um, precision=3)}</td>"
+                f"<td>{format_mae_rms_display(item.zpbs_residual_rms_um, precision=3)}</td>"
+                f"<td>{item.zpbs_residual_cond:.3e}</td>"
                 f"<td><a href='{html.escape(coeff_rel.as_posix())}'>coefficients</a></td>"
                 f"<td><img loading='lazy' src='thumbnails/{html.escape(thumb_name)}' alt='{html.escape(item.source_file.name)}'></td>"
                 "</tr>"
@@ -592,9 +605,9 @@ def write_qa_report(
       <tr>
         <th>File</th>
         <th>Surface</th>
-        <th>Sphere SSE</th>
-        <th>Surface RMS</th>
-        <th>Residual RMS</th>
+        <th>Sphere RMS (um)</th>
+        <th>ZPBS Residual RMS (um)</th>
+        <th>ZPBS Residual Cond</th>
         <th>CSV</th>
         <th>Preview</th>
       </tr>

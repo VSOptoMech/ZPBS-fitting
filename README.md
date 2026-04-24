@@ -8,13 +8,13 @@ This repository provides a curated standalone runtime snapshot for fitting spher
 
 Main entry points:
 
-- `batch_fit_xyz.py`: batch-process a folder of `.xyz` files and write summary outputs
-- `batch_fit_xyz_gui.py`: launch the GUI for running batches, single-file inspection, and replaying saved summaries
-- `azp_csv_pipeline.py`: core numerical helper layer used by the batch runner and GUI
+- `zpbs-batch-fit`: batch-process a folder of `.xyz` files and write summary outputs
+- `zpbs-batch-gui`: launch the GUI for running batches, single-file inspection, and replaying saved summaries
+- `src/zpbs/azp_csv_pipeline.py`: core numerical helper layer used by the batch runner and GUI
 
 Runtime package layout:
 
-- `src/zpbs/`: maintained package implementation used by the top-level wrappers
+- `src/zpbs/`: maintained package implementation used by the package entrypoints
 
 ## Setup
 
@@ -62,7 +62,7 @@ Files outside those families are ignored by the batch runner.
 ## Batch Runner
 
 ```bash
-uv run python batch_fit_xyz.py /path/to/xyz_dir --glob '*_FVS_*.xyz'
+uv run zpbs-batch-fit /path/to/xyz_dir --glob '*_FVS_*.xyz'
 ```
 
 Common useful options:
@@ -107,15 +107,15 @@ Typical contents:
 Per-surface coefficient CSVs include:
 
 - `Base sphere radius (mm)`
-- `Vertex (mm)`
-- `Vertex residual (mm)`
+- `Vertex (mm)` as the final near-center ZPBS fitted axial location
+- `Vertex residual (mm)` as the near-center residual after the full ZPBS-to-data reconstruction
 - `Norm. Radius (mm)`
 - Zernike terms `Z1..Z45`
 
 ## GUI
 
 ```bash
-uv run python batch_fit_xyz_gui.py
+uv run zpbs-batch-gui
 ```
 
 The public GUI supports three workflows:
@@ -180,6 +180,4 @@ If a completed run folder is copied to another machine, coefficient paths under 
 
 ## Supported Entry Points
 
-- `batch_fit_xyz.py`
-- `batch_fit_xyz_gui.py`
-- `azp_csv_pipeline.py`
+- `src/zpbs/`

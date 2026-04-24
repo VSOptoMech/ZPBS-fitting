@@ -15,12 +15,13 @@ from PyQt5.QtWidgets import QTableWidgetItem, QWidget
 from ..common import (
     parse_boolish,
     parse_optional_int,
+    uses_posterior_sign_convention,
     validate_sphere_reference_configuration,
     validate_zernike_method,
 )
 from ..io.xyz import load_xyz_point_cloud, parse_surface_metadata
 from ..models import FitArtifacts
-from ..pipeline.surface_fit import run_fit_pipeline
+from ..pipeline.surface_fit import run_fit_pipeline, zpbs_residual_on_axis_m0_um
 from ..reporting.batch_reports import render_overview_plot
 
 from .plotting import render_detailed_analysis_figure
@@ -243,7 +244,9 @@ class SubsetPlotCanvas(FigureCanvas):
         axis.plot(counts, max_values, color="#059669", linewidth=1.1, label="max_delta_rms")
         detail = "Select a removed-mode count."
         if selected_count is not None:
-            match = next((row for row in ordered_rows if int(float(row.get("removed_mode_count", "0"))) == selected_count), None)
+            match = next(
+                (row for row in ordered_rows if int(float(row.get("removed_mode_count", "0"))) == selected_count), None
+            )
             if match is not None:
                 axis.axvline(selected_count, color="#7c3aed", linewidth=1.0, alpha=0.8)
                 detail = (
@@ -423,6 +426,7 @@ class FitPreviewCanvas(FigureCanvas):
         coeff_meta, coeffs = parse_coefficients_csv(coeff_file)
         artifacts = self._fit_artifacts_from_preview(
             row=row,
+            manifest=manifest,
             source_file=source_file,
             coeff_file=coeff_file,
             metadata=metadata,
@@ -442,6 +446,7 @@ class FitPreviewCanvas(FigureCanvas):
         self,
         *,
         row: dict[str, str],
+        manifest: dict[str, object],
         source_file: Path,
         coeff_file: Path,
         metadata: Any,
@@ -450,24 +455,87 @@ class FitPreviewCanvas(FigureCanvas):
         """Build a FitArtifacts-compatible object from replayed summary data."""
         rho = np.asarray(fit_data["rho"], dtype=float)
         z = np.asarray(fit_data["z"], dtype=float)
-        sphere_residuals = np.asarray(fit_data["sphere_residuals"], dtype=float)
-        zernike_surface = np.asarray(fit_data["zernike_surface"], dtype=float)
-        zernike_surface_residuals = np.asarray(fit_data["zernike_surface_residuals"], dtype=float)
         zeros = np.zeros_like(rho)
+        sphere_residuals_um = np.asarray(
+            fit_data.get("sphere_residuals_um", fit_data.get("sphere_residuals", zeros)),
+            dtype=float,
+        )
         rho_norm = np.asarray(fit_data.get("rho_norm", rho / max(float(np.max(rho)), 1.0)), dtype=float)
         phi = np.asarray(fit_data.get("phi", zeros), dtype=float)
-        zernike_residual_surface = np.asarray(
-            fit_data.get("zernike_residual_surface", fit_data.get("zernike_surface", zernike_surface)),
+        zpbs_residual_surface_um = np.asarray(
+            fit_data.get(
+                "zpbs_residual_surface_um",
+                fit_data.get("zernike_residual_surface", zeros),
+            ),
             dtype=float,
         )
-        zernike_residual_residuals = np.asarray(
-            fit_data.get("zernike_residual_residuals", zernike_surface_residuals),
+        zpbs_residual_residuals_um = np.asarray(
+            fit_data.get(
+                "zpbs_residual_residuals_um",
+                fit_data.get("zernike_residual_residuals", sphere_residuals_um - zpbs_residual_surface_um),
+            ),
             dtype=float,
         )
-        zpoly_fits = np.asarray(fit_data.get("zpoly_fits", np.zeros(45, dtype=float)), dtype=float)
-        zpoly_fits2 = np.asarray(fit_data.get("zpoly_fits2", np.zeros(45, dtype=float)), dtype=float)
+        zpbs_residual_coefficients_um = np.asarray(
+            fit_data.get("zpbs_residual_coefficients_um", fit_data.get("zpoly_fits2", np.zeros(45, dtype=float))),
+            dtype=float,
+        )
+        if "zpbs_to_data_surface_um" in fit_data:
+            zpbs_to_data_surface_um = np.asarray(fit_data["zpbs_to_data_surface_um"], dtype=float)
+            zpbs_to_data_residuals_um = np.asarray(
+                fit_data.get("zpbs_to_data_residuals_um", z - zpbs_to_data_surface_um),
+                dtype=float,
+            )
+        else:
+            branch_sign = 1.0
+            if "reference_vertex_z_um" in fit_data and "z0_fit" in fit_data:
+                branch_sign = 1.0 if float(fit_data["reference_vertex_z_um"]) >= float(fit_data["z0_fit"]) else -1.0
+            elif uses_posterior_sign_convention(str(metadata.surf_id)):
+                branch_sign = -1.0
+            term = np.sqrt(np.clip(float(fit_data["applied_reference_radius_um"]) ** 2 - np.square(rho), 0.0, None))
+            sphere_surface_um = float(fit_data["z0_fit"]) + (branch_sign * term)
+            residual_sign = -1.0 if uses_posterior_sign_convention(str(metadata.surf_id)) else 1.0
+            zpbs_to_data_surface_um = sphere_surface_um + (residual_sign * zpbs_residual_surface_um)
+            zpbs_to_data_residuals_um = z - zpbs_to_data_surface_um
+        sphere_sse_um2 = float(
+            fit_data.get("sphere_sse_um2", fit_data.get("sphere_sse", np.sum(np.square(sphere_residuals_um))))
+        )
+        sphere_mae_um = float(
+            fit_data.get("sphere_mae_um", fit_data.get("sphere_mae", np.mean(np.abs(sphere_residuals_um))))
+        )
+        sphere_rms_um = float(
+            fit_data.get("sphere_rms_um", fit_data.get("sphere_rms", np.sqrt(np.mean(np.square(sphere_residuals_um)))))
+        )
+        zpbs_residual_sse_um2 = float(
+            fit_data.get(
+                "zpbs_residual_sse_um2",
+                fit_data.get("sphere_residual_zernike_sse", np.sum(np.square(zpbs_residual_residuals_um))),
+            )
+        )
+        zpbs_residual_mae_um = float(
+            fit_data.get(
+                "zpbs_residual_mae_um",
+                fit_data.get("sphere_residual_zernike_mae", np.mean(np.abs(zpbs_residual_residuals_um))),
+            )
+        )
+        zpbs_residual_rms_um = float(
+            fit_data.get(
+                "zpbs_residual_rms_um",
+                fit_data.get("sphere_residual_zernike_rms", np.sqrt(np.mean(np.square(zpbs_residual_residuals_um)))),
+            )
+        )
+        zpbs_residual_cond = float(
+            fit_data.get("zpbs_residual_cond", fit_data.get("sphere_residual_zernike_cond", 0.0))
+        )
         common_reference_radius_um = parse_optional_float(row.get("common_reference_radius_um", ""))
         common_normalization_radius_um = parse_optional_float(row.get("common_normalization_radius_um", ""))
+        idx_center = int(np.argmin(rho)) if len(rho) else 0
+        row_vertex_residual_um = parse_optional_float(row.get("vertex_residual_um", ""))
+        roc_mode = str(row.get("roc_mode", manifest.get("roc_mode", "fit-per-file"))).strip() or "fit-per-file"
+        normalization_mode = (
+            str(row.get("normalization_mode", manifest.get("normalization_mode", "per-file"))).strip() or "per-file"
+        )
+        run_name = str(row.get("run_name", manifest.get("run_name", "summary_preview"))).strip() or "summary_preview"
         return FitArtifacts(
             metadata=metadata,
             source_metadata=metadata,
@@ -480,13 +548,12 @@ class FitPreviewCanvas(FigureCanvas):
             rho=rho,
             phi=phi,
             rho_norm=rho_norm,
-            sphere_residuals=sphere_residuals,
-            zernike_surface=zernike_surface,
-            zernike_surface_residuals=zernike_surface_residuals,
-            zernike_residual_surface=zernike_residual_surface,
-            zernike_residual_residuals=zernike_residual_residuals,
-            zpoly_fits=zpoly_fits,
-            zpoly_fits2=zpoly_fits2,
+            sphere_residuals_um=sphere_residuals_um,
+            zpbs_to_data_surface_um=zpbs_to_data_surface_um,
+            zpbs_to_data_residuals_um=zpbs_to_data_residuals_um,
+            zpbs_residual_surface_um=zpbs_residual_surface_um,
+            zpbs_residual_residuals_um=zpbs_residual_residuals_um,
+            zpbs_residual_coefficients_um=zpbs_residual_coefficients_um,
             x0_fit=float(fit_data["x0_fit"]),
             y0_fit=float(fit_data["y0_fit"]),
             z0_fit=float(fit_data["z0_fit"]),
@@ -495,16 +562,16 @@ class FitPreviewCanvas(FigureCanvas):
             prefit_best_radius_um=parse_optional_float(row.get("prefit_best_radius_um", "")),
             sphere_fit_mode=str(fit_data["sphere_fit_mode"]),
             center_weight=float(fit_data["center_weight"]),
-            sphere_sse=float(fit_data["sphere_sse"]),
-            sphere_rms=float(fit_data.get("sphere_rms", np.sqrt(np.mean(np.square(sphere_residuals))))),
-            surface_zernike_sse=float(fit_data.get("surface_zernike_sse", np.sum(np.square(zernike_surface_residuals)))),
-            surface_zernike_rms=float(fit_data["surface_zernike_rms"]),
-            surface_zernike_cond=float(fit_data.get("surface_zernike_cond", 0.0)),
-            sphere_residual_zernike_sse=float(
-                fit_data.get("sphere_residual_zernike_sse", np.sum(np.square(zernike_residual_residuals)))
+            sphere_sse_um2=sphere_sse_um2,
+            sphere_mae_um=sphere_mae_um,
+            sphere_rms_um=sphere_rms_um,
+            zpbs_residual_sse_um2=zpbs_residual_sse_um2,
+            zpbs_residual_mae_um=zpbs_residual_mae_um,
+            zpbs_residual_rms_um=zpbs_residual_rms_um,
+            zpbs_residual_cond=zpbs_residual_cond,
+            zpbs_residual_on_axis_m0_um=float(
+                fit_data.get("zpbs_residual_on_axis_m0_um", zpbs_residual_on_axis_m0_um(zpbs_residual_coefficients_um))
             ),
-            sphere_residual_zernike_rms=float(fit_data["sphere_residual_zernike_rms"]),
-            sphere_residual_zernike_cond=float(fit_data.get("sphere_residual_zernike_cond", 0.0)),
             observed_aperture_radius_um=float(fit_data["observed_aperture_radius_um"]),
             norm_radius_um=float(fit_data["norm_radius_um"]),
             target_vertex_x_um=float(fit_data["target_vertex_x_um"]),
@@ -514,18 +581,71 @@ class FitPreviewCanvas(FigureCanvas):
             reference_vertex_y_um=float(fit_data["reference_vertex_y_um"]),
             reference_vertex_z_um=float(fit_data["reference_vertex_z_um"]),
             vertex_mismatch_z_um=float(fit_data["vertex_mismatch_z_um"]),
-            vertex_um=float(fit_data.get("zv", z[0] if len(z) else 0.0)),
-            vertex_residual_um=float(fit_data.get("zv2", sphere_residuals[0] if len(sphere_residuals) else 0.0)),
+            vertex_um=float(
+                fit_data.get(
+                    "vertex_fit_um",
+                    fit_data.get(
+                        "zv",
+                        z[0] if len(z) else 0.0,
+                    )
+                    - fit_data.get(
+                        "vertex_residual_um",
+                        row_vertex_residual_um
+                        if row_vertex_residual_um is not None
+                        else (zpbs_to_data_residuals_um[idx_center] if len(zpbs_to_data_residuals_um) else 0.0),
+                    ),
+                )
+            ),
+            sphere_vertex_residual_um=float(
+                fit_data.get(
+                    "sphere_vertex_residual_um",
+                    fit_data.get("zv2", sphere_residuals_um[idx_center] if len(sphere_residuals_um) else 0.0),
+                )
+            ),
+            vertex_residual_um=float(
+                fit_data.get(
+                    "vertex_residual_um",
+                    row_vertex_residual_um
+                    if row_vertex_residual_um is not None
+                    else (zpbs_to_data_residuals_um[idx_center] if len(zpbs_to_data_residuals_um) else 0.0),
+                )
+            ),
             method=str(fit_data.get("method", "lstsq")),
             n_modes=int(fit_data.get("n_modes", 45)),
-            roc_mode=row.get("roc_mode", "fit-per-file"),
-            normalization_mode=row.get("normalization_mode", "per-file"),
-            run_name=row.get("run_name", "summary_preview"),
+            roc_mode=roc_mode,
+            normalization_mode=normalization_mode,
+            run_name=run_name,
             common_reference_radius_um=common_reference_radius_um,
             common_normalization_radius_um=common_normalization_radius_um,
             round_radii_um=bool(fit_data.get("round_radii_um", False)),
             zernike_coeff_sigfigs=fit_data.get("zernike_coeff_sigfigs"),
         )
+
+    @staticmethod
+    def _is_compact_summary_row(row: dict[str, str], manifest: dict[str, object]) -> bool:
+        schema_version = parse_optional_int(manifest.get("summary_schema_version"))
+        return bool(schema_version and schema_version >= 2) or "run_name" not in row
+
+    def _resolve_replay_setting(
+        self,
+        *,
+        row: dict[str, str],
+        manifest: dict[str, object],
+        field_name: str,
+        legacy_default: object,
+        required_for_compact: bool = True,
+    ) -> object:
+        row_value = row.get(field_name)
+        if row_value not in (None, ""):
+            return row_value
+        manifest_value = manifest.get(field_name)
+        if manifest_value not in (None, "", "null"):
+            return manifest_value
+        if self._is_compact_summary_row(row, manifest) and required_for_compact:
+            raise ValueError(
+                f"Compact summary replay requires {field_name!r} in the workbook row or sibling run_manifest.json."
+            )
+        return legacy_default
 
     def clear_message(self, message: str) -> None:
         """Replace the canvas contents with a centered status message."""
@@ -544,32 +664,109 @@ class FitPreviewCanvas(FigureCanvas):
         source_file = Path(row.get("_resolved_source_file", row["source_file"]))
         coeff_file = Path(row.get("_resolved_output_coefficients_csv", row["output_coefficients_csv"]))
         metadata = parse_surface_metadata(source_file)
+        compact_summary = self._is_compact_summary_row(row, manifest)
+
+        roc_mode = (
+            str(
+                self._resolve_replay_setting(
+                    row=row,
+                    manifest=manifest,
+                    field_name="roc_mode",
+                    legacy_default="fit-per-file",
+                )
+            ).strip()
+            or "fit-per-file"
+        )
+        normalization_mode = (
+            str(
+                self._resolve_replay_setting(
+                    row=row,
+                    manifest=manifest,
+                    field_name="normalization_mode",
+                    legacy_default="per-file",
+                )
+            ).strip()
+            or "per-file"
+        )
+        method = validate_zernike_method(
+            str(
+                self._resolve_replay_setting(
+                    row=row,
+                    manifest=manifest,
+                    field_name="method",
+                    legacy_default="lstsq",
+                )
+            )
+        )
+        sphere_fit_mode = (
+            str(
+                self._resolve_replay_setting(
+                    row=row,
+                    manifest=manifest,
+                    field_name="sphere_fit_mode",
+                    legacy_default="legacy_lsq",
+                )
+            ).strip()
+            or "legacy_lsq"
+        )
+        center_weight_raw = self._resolve_replay_setting(
+            row=row,
+            manifest=manifest,
+            field_name="center_weight",
+            legacy_default="0.0",
+        )
+        center_weight = 0.0 if center_weight_raw in (None, "", "null") else float(str(center_weight_raw))
+        n_modes = int(
+            float(
+                self._resolve_replay_setting(
+                    row=row,
+                    manifest=manifest,
+                    field_name="n_modes",
+                    legacy_default="45",
+                )
+            )
+        )
+        round_radii_um = parse_boolish(
+            self._resolve_replay_setting(
+                row=row,
+                manifest=manifest,
+                field_name="round_radii_um",
+                legacy_default=False,
+            ),
+            default=False,
+        )
+        zernike_coeff_sigfigs = parse_optional_int(
+            self._resolve_replay_setting(
+                row=row,
+                manifest=manifest,
+                field_name="zernike_coeff_sigfigs",
+                legacy_default=None,
+                required_for_compact=False,
+            )
+        )
 
         reference_radius = None
-        if row.get("roc_mode") != "fit-per-file":
+        if roc_mode != "fit-per-file":
             reference_radius = parse_optional_float(row.get("applied_reference_radius_um", ""))
+            if compact_summary and reference_radius is None:
+                raise ValueError(
+                    "Compact summary replay requires 'applied_reference_radius_um' for non per-file ROC runs."
+                )
 
-        normalization_mode = row.get("normalization_mode", "per-file")
         normalization_radius = None
         if normalization_mode == "common-per-surf-id":
             normalization_radius = parse_optional_float(row.get("applied_normalization_radius_um", ""))
+            if compact_summary and normalization_radius is None:
+                raise ValueError(
+                    "Compact summary replay requires 'applied_normalization_radius_um' for common normalization runs."
+                )
 
         rcond_raw = manifest.get("rcond")
         rcond = None if rcond_raw in (None, "", "null") else float(str(rcond_raw))
-        round_radii_um = parse_boolish(row.get("round_radii_um", manifest.get("round_radii_um")), default=False)
-        zernike_coeff_sigfigs = parse_optional_int(
-            row.get("zernike_coeff_sigfigs", manifest.get("zernike_coeff_sigfigs"))
-        )
-        method = validate_zernike_method(row.get("method", manifest.get("method", "lstsq")))
-        sphere_fit_mode = str(row.get("sphere_fit_mode", manifest.get("sphere_fit_mode", "legacy_lsq"))).strip() or "legacy_lsq"
-        center_weight_raw = row.get("center_weight", manifest.get("center_weight", "0.0"))
-        center_weight = 0.0 if center_weight_raw in (None, "", "null") else float(str(center_weight_raw))
         validate_sphere_reference_configuration(
-            roc_mode=row.get("roc_mode", "fit-per-file"),
+            roc_mode=roc_mode,
             sphere_fit_mode=sphere_fit_mode,
         )
-
-        n_modes = int(float(row.get("n_modes", "45")))
         payload = self._load_preview_payload(
             row=row,
             manifest=manifest,

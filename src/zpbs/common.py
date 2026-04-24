@@ -13,9 +13,7 @@ SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 def make_output_filename(metadata: Any) -> str:
     """Mirror the notebook export naming style for coefficient CSVs."""
-    return (
-        f"ZPs_{metadata.design_token}-{metadata.fea_id}_{metadata.surface_token}_{metadata.force_id}_base_sphere.csv"
-    )
+    return f"ZPs_{metadata.design_token}-{metadata.fea_id}_{metadata.surface_token}_{metadata.force_id}_base_sphere.csv"
 
 
 def format_processed_label(metadata: Any) -> str:
@@ -90,6 +88,31 @@ def parse_optional_int(value: object) -> int | None:
     return int(float(str(value)))
 
 
+def format_mae_rms_um(value: object, *, decimals_small: int = 6, decimals_large: int = 3) -> str:
+    """Format MAE/RMS-style micrometer metrics with fixed 6 decimals below 1.0 um."""
+    if value is None:
+        return ""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        text = str(value)
+        if not text.strip():
+            return ""
+        return text
+
+    magnitude = abs(numeric)
+    if magnitude < 1.0:
+        return f"{numeric:.{decimals_small}f}"
+    if magnitude >= 1000.0:
+        return f"{numeric:.{decimals_large}e}"
+    return f"{numeric:.{decimals_large}f}"
+
+
+def format_mae_rms_display(value: object, *, precision: int = 3) -> str:
+    """Backward-compatible wrapper for MAE/RMS display formatting."""
+    return format_mae_rms_um(value, decimals_small=6, decimals_large=precision)
+
+
 def round_nearest_micrometer(value_um: float) -> float:
     """Round to the nearest whole micrometer using half-up semantics."""
     return float(math.floor(float(value_um) + 0.5))
@@ -139,7 +162,7 @@ def validate_sphere_reference_configuration(*, roc_mode: str, sphere_fit_mode: s
     roc = roc_mode.strip().lower()
     if mode != "legacy_lsq" and roc != "fit-per-file":
         raise ValueError(
-            "Only sphere_fit_mode=legacy_lsq supports roc_mode fixed or average-best-fit; "
+            "Only sphere_fit_mode=legacy_lsq supports fixed ROC or roc_mode average-best-fit; "
             f"got roc_mode={roc_mode!r} with sphere_fit_mode={sphere_fit_mode!r}."
         )
 
@@ -149,7 +172,6 @@ def validate_zernike_method(method: str) -> str:
     method_key = str(method).strip().lower()
     if method_key != "lstsq":
         raise ValueError(
-            "Unsupported Zernike fitting method in maintained code: "
-            f"{method!r}. Only 'lstsq' is supported."
+            f"Unsupported Zernike fitting method in maintained code: {method!r}. Only 'lstsq' is supported."
         )
     return method_key

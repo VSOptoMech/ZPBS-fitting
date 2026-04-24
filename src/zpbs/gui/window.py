@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -13,7 +14,7 @@ import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", str((Path(__file__).resolve().parents[3] / ".matplotlib").resolve()))
 
-from PyQt5.QtCore import QEvent, QProcess, QThread, QTimer, Qt
+from PyQt5.QtCore import QEvent, QProcess, QProcessEnvironment, QThread, QTimer, Qt
 from PyQt5.QtGui import QCloseEvent, QColor, QPalette
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -38,7 +39,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ..common import is_focus_surface_family, validate_sphere_reference_configuration
+from ..common import format_mae_rms_display, is_focus_surface_family, validate_sphere_reference_configuration
 from ..io.xyz import collapse_identical_initial_inputs, parse_surface_metadata
 from .canvases import FitPreviewCanvas, NumericTableWidgetItem, OverviewPlotCanvas, SubsetPlotCanvas
 from .single_file import (
@@ -58,13 +59,18 @@ from .support import (
     parse_optional_float,
 )
 from ..io.remap import infer_original_run_dir, infer_original_source_root, prepare_summary_row_for_preview
-from ..io.workbook import detect_subset_workbook_kind, parse_inline_xlsx_rows, parse_run_manifest
+from ..io.workbook import (
+    detect_subset_workbook_kind,
+    is_compact_summary_rows,
+    parse_inline_xlsx_rows,
+    parse_run_manifest,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parents[3]
-BATCH_SCRIPT = SCRIPT_DIR / "batch_fit_xyz.py"
+CLI_MODULE = "zpbs.cli.batch_cli"
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "batch_outputs"
 FOCUS_SURF_IDS = ("AA", "AP", "PA", "PP")
-PATH_FIELD_MIN_WIDTH = 720
+PATH_FIELD_MIN_WIDTH = 360
 FIT_CONTROL_WIDTH = 250
 BROWSE_BUTTON_WIDTH = 92
 LARGE_BATCH_WARNING_THRESHOLD = 1000
@@ -78,6 +84,11 @@ class BatchFitWindow(QMainWindow):
         self.setWindowTitle("Batch Fit Launcher and Viewer")
         self.resize(1380, 940)
         self.process: QProcess | None = None
+        self._process_started_at: datetime | None = None
+        self._active_run_dir: Path | None = None
+        self._active_total_inputs: int | None = None
+        self._processed_progress_count = 0
+        self._process_output_buffer = ""
         self.summary_rows: list[dict[str, str]] = []
         self.summary_manifest: dict[str, object] = {}
         self.summary_workbook_path: Path | None = None
@@ -144,7 +155,7 @@ class BatchFitWindow(QMainWindow):
         right_layout.addWidget(self._build_command_preview_group())
         right_layout.addWidget(self._build_log_group(), stretch=1)
 
-        left.setMinimumWidth(650)
+        left.setMinimumWidth(600)
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setSizes([700, 920])
@@ -168,9 +179,7 @@ class BatchFitWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
-        left_layout.addWidget(self._build_single_file_status_group())
-        left_layout.addWidget(self._build_single_file_coeff_table_group(), stretch=1)
-        left_layout.addWidget(self._build_single_file_diagnostics_group(), stretch=1)
+        left_layout.addWidget(self._build_single_file_fit_data_group(), stretch=1)
         splitter.addWidget(left)
 
         right = QWidget(splitter)
@@ -184,7 +193,7 @@ class BatchFitWindow(QMainWindow):
         overview_layout.addWidget(self.single_file_overview_canvas, stretch=1)
         right_layout.addWidget(overview_group, stretch=1)
         splitter.addWidget(right)
-        splitter.setSizes([470, 930])
+        splitter.setSizes([560, 840])
 
         layout.addWidget(splitter, stretch=1)
         self._refresh_single_file_export_buttons()
@@ -201,6 +210,7 @@ class BatchFitWindow(QMainWindow):
         self.single_file_prev_button = QPushButton("Prev", self)
         self.single_file_prev_button.setMaximumWidth(72)
         self.single_file_force_combo = QComboBox(self)
+        self.single_file_force_combo.setMinimumWidth(100)
         self.single_file_next_button = QPushButton("Next", self)
         self.single_file_next_button.setMaximumWidth(72)
         self.single_file_refresh_button = QPushButton("Refresh", self)
@@ -229,6 +239,12 @@ class BatchFitWindow(QMainWindow):
         self.single_file_round_coeffs_check = QCheckBox("Round coefficients", self)
         self.single_file_round_radii_check.setChecked(True)
         self.single_file_round_coeffs_check.setChecked(True)
+        self.single_file_save_csv_button = QPushButton("Save CSV...", self)
+        self.single_file_save_overview_button = QPushButton("Save Overview Plot...", self)
+        self.single_file_save_bundle_button = QPushButton("Save Bundle...", self)
+        self.single_file_save_csv_button.clicked.connect(self.save_single_file_csv)
+        self.single_file_save_overview_button.clicked.connect(self.save_single_file_overview_plot)
+        self.single_file_save_bundle_button.clicked.connect(self.save_single_file_bundle)
 
         for widget in (
             self.single_file_path_edit,
@@ -236,12 +252,13 @@ class BatchFitWindow(QMainWindow):
         ):
             widget.setMinimumWidth(PATH_FIELD_MIN_WIDTH)
 
+        self.single_file_sphere_fit_mode_combo.setFixedWidth(220)
+
         for control in (
-            self.single_file_sphere_fit_mode_combo,
             self.single_file_center_weight_spin,
             self.single_file_n_modes_spin,
         ):
-            control.setFixedWidth(190)
+            control.setFixedWidth(80)
 
         file_row = QWidget(self)
         file_layout = QGridLayout(file_row)
@@ -293,7 +310,7 @@ class BatchFitWindow(QMainWindow):
         selector_layout.addSpacing(8)
         selector_layout.addWidget(QLabel("Force", selector_row))
         selector_layout.addWidget(self.single_file_prev_button)
-        selector_layout.addWidget(self.single_file_force_combo, stretch=1)
+        selector_layout.addWidget(self.single_file_force_combo)
         selector_layout.addWidget(self.single_file_next_button)
 
         selector_layout.addSpacing(8)
@@ -326,13 +343,25 @@ class BatchFitWindow(QMainWindow):
         options_layout.addWidget(self.single_file_n_modes_spin)
         options_layout.addWidget(self.single_file_round_radii_check)
         options_layout.addWidget(self.single_file_round_coeffs_check)
+        options_layout.addSpacing(8)
+        options_layout.addWidget(self.single_file_save_csv_button)
+        options_layout.addWidget(self.single_file_save_overview_button)
+        options_layout.addWidget(self.single_file_save_bundle_button)
         options_layout.addStretch(1)
+
+        self.single_file_status_label = QLabel("Select a source file or preload a folder.")
+        self.single_file_status_label.setWordWrap(True)
+        self.single_file_status_label.setProperty("themeRole", "mutedText")
+        self.single_file_status_label.setStyleSheet(f"color: {self._muted_text_color()};")
 
         layout.addWidget(file_row)
         layout.addWidget(selector_row)
         layout.addWidget(options_row)
+        layout.addWidget(self.single_file_status_label)
 
-        self.single_file_path_edit.editingFinished.connect(lambda: self._on_single_file_path_committed(show_warning=True))
+        self.single_file_path_edit.editingFinished.connect(
+            lambda: self._on_single_file_path_committed(show_warning=True)
+        )
         self.single_file_folder_edit.editingFinished.connect(self._on_single_file_folder_committed)
         self.single_file_force_combo.currentTextChanged.connect(lambda _text: self._refresh_single_file_state_options())
         self.single_file_prev_button.clicked.connect(lambda: self._navigate_single_file_force(-1))
@@ -347,63 +376,17 @@ class BatchFitWindow(QMainWindow):
         self._sync_single_file_controls()
         return group
 
-    def _build_single_file_status_group(self) -> QGroupBox:
-        group = QGroupBox("Actions", self)
+    def _build_single_file_fit_data_group(self) -> QGroupBox:
+        group = QGroupBox("Diagnostics and Fit Data", self)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(14, 16, 14, 14)
-        layout.setSpacing(10)
-
-        self.single_file_status_label = QLabel("Select a source file or preload a folder.")
-        self.single_file_status_label.setWordWrap(True)
-        self.single_file_status_label.setProperty("themeRole", "mutedText")
-        self.single_file_status_label.setStyleSheet(f"color: {self._muted_text_color()};")
-
-        button_row = QWidget(self)
-        button_layout = QHBoxLayout(button_row)
-        button_layout.setContentsMargins(0, 0, 0, 0)
-        button_layout.setSpacing(8)
-        self.single_file_save_csv_button = QPushButton("Save CSV...", self)
-        self.single_file_save_overview_button = QPushButton("Save Overview Plot...", self)
-        self.single_file_save_bundle_button = QPushButton("Save Bundle...", self)
-        self.single_file_save_csv_button.clicked.connect(self.save_single_file_csv)
-        self.single_file_save_overview_button.clicked.connect(self.save_single_file_overview_plot)
-        self.single_file_save_bundle_button.clicked.connect(self.save_single_file_bundle)
-        for button in (
-            self.single_file_save_csv_button,
-            self.single_file_save_overview_button,
-            self.single_file_save_bundle_button,
-        ):
-            button_layout.addWidget(button)
-        button_layout.addStretch(1)
-
-        layout.addWidget(self.single_file_status_label)
-        layout.addWidget(button_row)
-        return group
-
-    def _build_single_file_coeff_table_group(self) -> QGroupBox:
-        group = QGroupBox("Exported Coefficient CSV", self)
-        layout = QVBoxLayout(group)
-        self.single_file_coeff_table = QTableWidget(self)
-        self.single_file_coeff_table.setColumnCount(2)
-        self.single_file_coeff_table.setHorizontalHeaderLabels(["Field", "Value"])
-        self.single_file_coeff_table.verticalHeader().setVisible(False)
-        self.single_file_coeff_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.single_file_coeff_table.setSelectionMode(QTableWidget.NoSelection)
-        self.single_file_coeff_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.single_file_coeff_table)
-        return group
-
-    def _build_single_file_diagnostics_group(self) -> QGroupBox:
-        group = QGroupBox("Extended Diagnostics", self)
-        layout = QVBoxLayout(group)
-        self.single_file_diagnostics_table = QTableWidget(self)
-        self.single_file_diagnostics_table.setColumnCount(2)
-        self.single_file_diagnostics_table.setHorizontalHeaderLabels(["Field", "Value"])
-        self.single_file_diagnostics_table.verticalHeader().setVisible(False)
-        self.single_file_diagnostics_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.single_file_diagnostics_table.setSelectionMode(QTableWidget.NoSelection)
-        self.single_file_diagnostics_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.single_file_diagnostics_table)
+        self.single_file_fit_data_table = QTableWidget(self)
+        self.single_file_fit_data_table.setColumnCount(2)
+        self.single_file_fit_data_table.setHorizontalHeaderLabels(["Field", "Value"])
+        self.single_file_fit_data_table.verticalHeader().setVisible(False)
+        self.single_file_fit_data_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.single_file_fit_data_table.setSelectionMode(QTableWidget.NoSelection)
+        self.single_file_fit_data_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.single_file_fit_data_table)
         return group
 
     def _set_single_file_status(self, text: str) -> None:
@@ -412,8 +395,7 @@ class BatchFitWindow(QMainWindow):
     def _clear_single_file_result_views(self, message: str) -> None:
         self.single_file_result = None
         self.single_file_overview_canvas.clear_message(message)
-        self._populate_name_value_table(self.single_file_coeff_table, [])
-        self._populate_name_value_table(self.single_file_diagnostics_table, [])
+        self._populate_name_value_table(self.single_file_fit_data_table, [])
         self._refresh_single_file_export_buttons()
 
     def _populate_name_value_table(self, table: QTableWidget, rows: list[tuple[str, str]]) -> None:
@@ -435,22 +417,32 @@ class BatchFitWindow(QMainWindow):
             ("Normalization mode", artifacts.normalization_mode),
             ("Round radii", "on" if artifacts.round_radii_um else "off"),
             ("Round coefficients", str(artifacts.zernike_coeff_sigfigs or "off")),
-            ("Applied reference radius (um)", format_metric(artifacts.applied_reference_radius_um, precision=4)),
             ("Observed aperture radius (um)", format_metric(artifacts.observed_aperture_radius_um, precision=4)),
-            ("Normalization radius (um)", format_metric(artifacts.norm_radius_um, precision=4)),
-            ("Sphere SSE", format_metric(artifacts.sphere_sse, precision=3)),
-            ("Sphere RMS", format_metric(artifacts.sphere_rms, precision=3)),
-            ("Surface RMS", format_metric(artifacts.surface_zernike_rms, precision=3)),
-            ("Residual RMS", format_metric(artifacts.sphere_residual_zernike_rms, precision=3)),
-            ("Vertex (um)", format_metric(artifacts.vertex_um, precision=6)),
-            ("Vertex residual (um)", format_metric(artifacts.vertex_residual_um, precision=6)),
-            ("Target vertex z (um)", format_metric(artifacts.target_vertex_z_um, precision=4)),
             ("Reference vertex z (um)", format_metric(artifacts.reference_vertex_z_um, precision=4)),
-            ("Vertex mismatch z (um)", format_metric(artifacts.vertex_mismatch_z_um, precision=3)),
+            ("Sphere MAE (um)", format_mae_rms_display(artifacts.sphere_mae_um, precision=3)),
+            ("Sphere RMS (um)", format_mae_rms_display(artifacts.sphere_rms_um, precision=3)),
+            ("ZPBS residual MAE (um)", format_mae_rms_display(artifacts.zpbs_residual_mae_um, precision=3)),
+            ("ZPBS residual RMS (um)", format_mae_rms_display(artifacts.zpbs_residual_rms_um, precision=3)),
+            ("ZPBS residual cond", format_metric(artifacts.zpbs_residual_cond, precision=3)),
+            (
+                "ZPBS residual on-axis m0 (um)",
+                format_mae_rms_display(artifacts.zpbs_residual_on_axis_m0_um, precision=3),
+            ),
             ("Coefficient CSV", str(result.csv_path)),
             ("Overview plot", str(result.overview_plot_path)),
             ("Analysis JSON", str(result.analysis_json_path)),
         ]
+
+    def _fit_data_rows_for_result(self, result: SingleFileAnalysisResult) -> list[tuple[str, str]]:
+        coeff_rows = list(result.coeff_rows)
+        diagnostic_rows = self._diagnostic_rows_for_result(result)
+        if not diagnostic_rows:
+            return coeff_rows
+        insert_at = next(
+            (index + 1 for index, (name, _value) in enumerate(coeff_rows) if name == "Norm. Radius (mm)"),
+            len(coeff_rows),
+        )
+        return [*coeff_rows[:insert_at], *diagnostic_rows, *coeff_rows[insert_at:]]
 
     def _sync_single_file_controls(self) -> None:
         sphere_fit_mode = str(self.single_file_sphere_fit_mode_combo.currentData())
@@ -551,8 +543,7 @@ class BatchFitWindow(QMainWindow):
         self.single_file_result = result
         self.single_file_results_cache[result.cache_key] = result
         self.single_file_overview_canvas.plot_artifacts(result.artifacts)
-        self._populate_name_value_table(self.single_file_coeff_table, result.coeff_rows)
-        self._populate_name_value_table(self.single_file_diagnostics_table, self._diagnostic_rows_for_result(result))
+        self._populate_name_value_table(self.single_file_fit_data_table, self._fit_data_rows_for_result(result))
         status_prefix = "Loaded cached analysis" if cached_result else "Analysis ready"
         self._set_single_file_status(
             f"{status_prefix}: {result.artifacts.source_file.name} | temp: {result.result_dir}"
@@ -606,7 +597,11 @@ class BatchFitWindow(QMainWindow):
             return None
         for path in self.single_file_candidates:
             metadata = self._single_file_metadata(path)
-            if metadata.surf_id == surf_id and metadata.force_id == force_id and metadata.surface_token.endswith(suffix):
+            if (
+                metadata.surf_id == surf_id
+                and metadata.force_id == force_id
+                and metadata.surface_token.endswith(suffix)
+            ):
                 return path
         return None
 
@@ -616,11 +611,19 @@ class BatchFitWindow(QMainWindow):
 
     def _refresh_single_file_surf_options(self, preferred: Path | None = None) -> None:
         available = {self._single_file_metadata(path).surf_id for path in self.single_file_candidates}
-        preferred_surf_id = self._single_file_metadata(preferred).surf_id if preferred is not None and preferred.exists() else ""
+        preferred_surf_id = (
+            self._single_file_metadata(preferred).surf_id if preferred is not None and preferred.exists() else ""
+        )
         current = self._single_file_selected_surf_id()
-        target = current if current in available else preferred_surf_id if preferred_surf_id in available else next(
-            (surf_id for surf_id in FOCUS_SURF_IDS if surf_id in available),
-            None,
+        target = (
+            current
+            if current in available
+            else preferred_surf_id
+            if preferred_surf_id in available
+            else next(
+                (surf_id for surf_id in FOCUS_SURF_IDS if surf_id in available),
+                None,
+            )
         )
         for surf_id, button in self.single_file_surf_buttons.items():
             button.blockSignals(True)
@@ -656,7 +659,8 @@ class BatchFitWindow(QMainWindow):
         matching = [
             path
             for path in self.single_file_candidates
-            if self._single_file_metadata(path).surf_id == surf_id and self._single_file_metadata(path).force_id == force_id
+            if self._single_file_metadata(path).surf_id == surf_id
+            and self._single_file_metadata(path).force_id == force_id
         ]
         available_suffixes = {
             self._single_file_metadata(path).surface_token[-1].upper()
@@ -673,9 +677,15 @@ class BatchFitWindow(QMainWindow):
             else ""
         )
         current = self._single_file_selected_state_suffix()
-        target = current if current in available_suffixes else preferred_suffix if preferred_suffix in available_suffixes else next(
-            (suffix for suffix in ("I", "D") if suffix in available_suffixes),
-            None,
+        target = (
+            current
+            if current in available_suffixes
+            else preferred_suffix
+            if preferred_suffix in available_suffixes
+            else next(
+                (suffix for suffix in ("I", "D") if suffix in available_suffixes),
+                None,
+            )
         )
         for suffix, button in self.single_file_state_buttons.items():
             button.blockSignals(True)
@@ -728,7 +738,11 @@ class BatchFitWindow(QMainWindow):
         preferred = self._current_single_file_source()
         self._set_single_file_candidates(candidates, preferred=preferred)
         if candidates:
-            selected_path = preferred if preferred is not None and preferred.resolve() in {path.resolve() for path in candidates} else candidates[0]
+            selected_path = (
+                preferred
+                if preferred is not None and preferred.resolve() in {path.resolve() for path in candidates}
+                else candidates[0]
+            )
             self._apply_single_file_source(selected_path, queue_analysis=True)
             self._set_single_file_status(f"Loaded {len(candidates)} maintained files from {folder}.")
         else:
@@ -772,7 +786,9 @@ class BatchFitWindow(QMainWindow):
         if self._current_single_file_source() is not None:
             self._queue_single_file_analysis(force=True)
 
-    def _copy_single_file_artifact(self, source_path: Path, *, caption: str, default_name: str, file_filter: str) -> None:
+    def _copy_single_file_artifact(
+        self, source_path: Path, *, caption: str, default_name: str, file_filter: str
+    ) -> None:
         selected, _ = QFileDialog.getSaveFileName(self, caption, str(source_path.with_name(default_name)), file_filter)
         if not selected:
             return
@@ -841,6 +857,7 @@ class BatchFitWindow(QMainWindow):
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
+                top: -3px;
                 left: 12px;
                 padding: 0 4px;
                 color: {title_color};
@@ -925,7 +942,7 @@ class BatchFitWindow(QMainWindow):
         title = QLabel("Batch XYZ Fitter")
         title.setStyleSheet("font-size: 20px; font-weight: 600;")
         subtitle = QLabel(
-            "Wrapper for batch_fit_xyz.py. The runner only includes AA/AP/PA/PP files, and the viewer can load a summary workbook to inspect individual fits live."
+            "Package-native GUI for the maintained batch runner. The runner only includes AA/AP/PA/PP files, and the viewer can load a summary workbook to inspect individual fits live."
         )
         subtitle.setWordWrap(True)
         subtitle.setProperty("themeRole", "mutedText")
@@ -1238,7 +1255,9 @@ class BatchFitWindow(QMainWindow):
         self.summary_original_source_root_edit = QLineEdit(self)
         self.summary_local_source_root_edit = QLineEdit(self)
 
-        self.summary_original_source_root_edit.setPlaceholderText("Auto-filled from run_manifest.json or source_file paths")
+        self.summary_original_source_root_edit.setPlaceholderText(
+            "Auto-filled from run_manifest.json or source_file paths"
+        )
         self.summary_local_source_root_edit.setPlaceholderText("Choose the local folder containing the raw .xyz files")
         self.summary_original_source_root_edit.editingFinished.connect(self._refresh_current_summary_preview_if_loaded)
         self.summary_local_source_root_edit.editingFinished.connect(self._refresh_current_summary_preview_if_loaded)
@@ -1423,7 +1442,9 @@ class BatchFitWindow(QMainWindow):
 
         def choose_path() -> None:
             if directory:
-                selected = QFileDialog.getExistingDirectory(self, "Select Directory", line_edit.text() or str(SCRIPT_DIR))
+                selected = QFileDialog.getExistingDirectory(
+                    self, "Select Directory", line_edit.text() or str(SCRIPT_DIR)
+                )
             elif save:
                 selected, _ = QFileDialog.getSaveFileName(
                     self,
@@ -1457,8 +1478,39 @@ class BatchFitWindow(QMainWindow):
     def _default_run_name(self) -> str:
         return datetime.now().strftime("gui_run_%Y%m%d_%H%M%S")
 
+    def _active_batch_run_dir(self) -> Path:
+        output_root = Path(self.output_dir_edit.text().strip()).expanduser()
+        return output_root / self.run_name_edit.text().strip()
+
+    @staticmethod
+    def _format_elapsed_seconds(elapsed_seconds: float) -> str:
+        if elapsed_seconds < 60:
+            return f"{elapsed_seconds:.1f} s"
+        minutes, seconds = divmod(elapsed_seconds, 60.0)
+        return f"{int(minutes)} min {seconds:.1f} s"
+
     def _reset_run_name(self) -> None:
         self.run_name_edit.setText(self._default_run_name())
+
+    def _append_progress_line(self, current: int, total: int, source_file: str) -> None:
+        """Append lightweight per-file progress text using just the source stem."""
+        self.log_output.appendPlainText(f"processed ({current}/{total}): {Path(source_file).stem}")
+
+    def _handle_process_output_line(self, line: str) -> None:
+        """Normalize subprocess output into user-friendly live progress lines where possible."""
+        stripped = line.rstrip("\n")
+        if not stripped:
+            return
+        if stripped.startswith("processed: "):
+            self._processed_progress_count += 1
+            total = self._active_total_inputs or self._processed_progress_count
+            self._append_progress_line(
+                self._processed_progress_count,
+                total,
+                stripped.removeprefix("processed: ").strip(),
+            )
+            return
+        self.log_output.appendPlainText(stripped)
 
     def _on_roc_mode_changed(self) -> None:
         self._sync_sphere_reference_controls()
@@ -1482,7 +1534,7 @@ class BatchFitWindow(QMainWindow):
         self.center_weight_spin.setEnabled(sphere_fit_mode == "center_weighted")
 
     def build_command(self) -> list[str]:
-        args = [str(BATCH_SCRIPT), self.input_dir_edit.text().strip()]
+        args = ["-m", CLI_MODULE, self.input_dir_edit.text().strip()]
         if self.glob_edit.text().strip():
             args.extend(["--glob", self.glob_edit.text().strip()])
         if self.output_dir_edit.text().strip():
@@ -1495,9 +1547,10 @@ class BatchFitWindow(QMainWindow):
         roc_mode = str(self.roc_mode_combo.currentData())
         sphere_fit_mode = str(self.sphere_fit_mode_combo.currentData())
         normalization_mode = str(self.normalization_mode_combo.currentData())
-        args.extend(["--roc-mode", roc_mode])
         if roc_mode == "fixed":
             args.extend(["--fixed-roc-um", f"{self.fixed_roc_spin.value():.6f}"])
+        else:
+            args.extend(["--roc-mode", roc_mode])
         args.extend(["--sphere-fit-mode", sphere_fit_mode])
         args.extend(["--center-weight", f"{self.center_weight_spin.value():.2f}"])
         args.extend(["--normalization-mode", normalization_mode])
@@ -1553,11 +1606,7 @@ class BatchFitWindow(QMainWindow):
         input_dir = Path(self.input_dir_edit.text().strip())
         matcher = input_dir.rglob if self.recursive_check.isChecked() else input_dir.glob
         matched_files = sorted(path for path in matcher(self.glob_edit.text().strip()) if path.is_file())
-        focus_files = [
-            path
-            for path in matched_files
-            if is_focus_surface_family(parse_surface_metadata(path).surf_id)
-        ]
+        focus_files = [path for path in matched_files if is_focus_surface_family(parse_surface_metadata(path).surf_id)]
         processing_inputs = collapse_identical_initial_inputs(focus_files)
         return len(processing_inputs), len(matched_files), len(focus_files)
 
@@ -1593,16 +1642,29 @@ class BatchFitWindow(QMainWindow):
             return
         if not self.validate_inputs():
             return
+        effective_count = None
+        try:
+            effective_count, _matched_count, _focus_count = self._effective_input_count_summary()
+        except ValueError:
+            effective_count = None
         if not self._confirm_large_batch_run():
             return
 
         self.log_output.clear()
         self.refresh_command_preview()
+        self._active_run_dir = self._active_batch_run_dir()
+        self._process_started_at = datetime.now()
+        self._active_total_inputs = effective_count
+        self._processed_progress_count = 0
+        self._process_output_buffer = ""
 
         process = QProcess(self)
         process.setProgram(sys.executable)
         process.setArguments(self.build_command())
         process.setWorkingDirectory(str(SCRIPT_DIR))
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUNBUFFERED", "1")
+        process.setProcessEnvironment(env)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(self._consume_output)
         process.finished.connect(self._process_finished)
@@ -1626,17 +1688,73 @@ class BatchFitWindow(QMainWindow):
             return
         chunk = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         if chunk:
-            self.log_output.appendPlainText(chunk.rstrip("\n"))
+            self._process_output_buffer += chunk
+            while "\n" in self._process_output_buffer:
+                line, self._process_output_buffer = self._process_output_buffer.split("\n", 1)
+                self._handle_process_output_line(line)
 
     def _process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
         self.run_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        self.log_output.appendPlainText(
-            f"\nCompleted successfully with exit code {exit_code}.\n"
-            if exit_code == 0
-            else f"\nProcess exited with code {exit_code}.\n"
+        if self._process_output_buffer:
+            self._handle_process_output_line(self._process_output_buffer)
+            self._process_output_buffer = ""
+        elapsed_seconds = (
+            (datetime.now() - self._process_started_at).total_seconds()
+            if self._process_started_at is not None
+            else None
         )
+        if exit_code == 0:
+            processed_files = None
+            failed_files = None
+            run_dir = self._active_run_dir
+            manifest_path = run_dir / "run_manifest.json" if run_dir is not None else None
+            summary_report_path: Path | None = None
+            if manifest_path is not None and manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                except json.JSONDecodeError:
+                    manifest = {}
+                processed_files = manifest.get("processed_files")
+                failed_files = manifest.get("failed_files")
+                summary_report_text = manifest.get("summary_report_path")
+                if summary_report_text:
+                    summary_report_path = Path(str(summary_report_text))
+            if summary_report_path is not None:
+                self.summary_file_edit.setText(str(summary_report_path))
+
+            if isinstance(processed_files, int) and isinstance(failed_files, int):
+                success_line = (
+                    f"\nCompleted successfully: processed {processed_files} file{'' if processed_files == 1 else 's'}"
+                )
+                if failed_files:
+                    success_line += f", {failed_files} failed"
+                if elapsed_seconds is not None:
+                    success_line += f" in {self._format_elapsed_seconds(elapsed_seconds)}"
+                if run_dir is not None:
+                    success_line += f".\nResults: {run_dir}\n"
+                else:
+                    success_line += ".\n"
+            else:
+                success_line = "\nCompleted successfully."
+                if elapsed_seconds is not None:
+                    success_line += f" Total time: {self._format_elapsed_seconds(elapsed_seconds)}."
+                if run_dir is not None:
+                    success_line += f"\nResults: {run_dir}\n"
+                else:
+                    success_line += "\n"
+            self.log_output.appendPlainText(success_line)
+            if summary_report_path is not None:
+                self.log_output.appendPlainText(f"Summary workbook: {summary_report_path}")
+            if manifest_path is not None and manifest_path.exists():
+                self.log_output.appendPlainText(f"Run manifest: {manifest_path}")
+        else:
+            self.log_output.appendPlainText(f"\nProcess exited with code {exit_code}.\n")
         self.process = None
+        self._process_started_at = None
+        self._active_run_dir = None
+        self._active_total_inputs = None
+        self._processed_progress_count = 0
 
     def _refresh_current_summary_preview_if_loaded(self) -> None:
         if self.summary_rows:
@@ -1693,8 +1811,18 @@ class BatchFitWindow(QMainWindow):
             QMessageBox.warning(self, "No Rows", "No AA/AP/PA/PP rows were found in the workbook.")
             return
 
+        manifest = parse_run_manifest(path)
+        if is_compact_summary_rows(rows) and not manifest:
+            QMessageBox.warning(
+                self,
+                "Missing Run Manifest",
+                "This compact batch summary requires the sibling run_manifest.json for replay.\n\n"
+                f"Expected next to:\n{path}",
+            )
+            return
+
         self.summary_rows = rows
-        self.summary_manifest = parse_run_manifest(path)
+        self.summary_manifest = manifest
         self.summary_workbook_path = path
         inferred_source_root = infer_original_source_root(rows, self.summary_manifest)
         self.summary_original_source_root_edit.setText(str(inferred_source_root or ""))
@@ -1714,14 +1842,27 @@ class BatchFitWindow(QMainWindow):
             + "\n".join(sorted(str(key) for key in self.summary_manifest))
         )
         if self.current_selected_row() is None:
-            self.preview_canvas.clear_message("Summary loaded, but no matching AA/AP/PA/PP row is currently selectable.")
+            self.preview_canvas.clear_message(
+                "Summary loaded, but no matching AA/AP/PA/PP row is currently selectable."
+            )
         else:
             self.plot_current_selection()
+
+    def _summary_display_run_name(self) -> str:
+        if self.summary_manifest.get("run_name"):
+            return str(self.summary_manifest["run_name"])
+        if self.summary_workbook_path is not None:
+            return self.summary_workbook_path.stem
+        return "summary_preview"
 
     def _refresh_surf_options(self) -> None:
         available = {row["surf_id"] for row in self.summary_rows}
         current = self._selected_surf_id()
-        target = current if current in available else next((surf_id for surf_id in FOCUS_SURF_IDS if surf_id in available), None)
+        target = (
+            current
+            if current in available
+            else next((surf_id for surf_id in FOCUS_SURF_IDS if surf_id in available), None)
+        )
         for surf_id, button in self.surf_id_buttons.items():
             button.blockSignals(True)
             button.setEnabled(surf_id in available)
@@ -1750,14 +1891,14 @@ class BatchFitWindow(QMainWindow):
     def _refresh_surface_token_options(self) -> None:
         surf_id = self._selected_surf_id()
         force_id = self.force_id_combo.currentText()
-        matching = [
-            row
-            for row in self.summary_rows
-            if row["surf_id"] == surf_id and row["force_id"] == force_id
-        ]
+        matching = [row for row in self.summary_rows if row["surf_id"] == surf_id and row["force_id"] == force_id]
         available_suffixes = {row["surface_token"][-1].upper() for row in matching if row.get("surface_token")}
         current = self._selected_surface_suffix()
-        target = current if current in available_suffixes else next((suffix for suffix in ("I", "D") if suffix in available_suffixes), None)
+        target = (
+            current
+            if current in available_suffixes
+            else next((suffix for suffix in ("I", "D") if suffix in available_suffixes), None)
+        )
         for suffix, button in self.surface_suffix_buttons.items():
             button.blockSignals(True)
             button.setEnabled(suffix in available_suffixes)
@@ -1794,23 +1935,31 @@ class BatchFitWindow(QMainWindow):
             local_source_root_text=self.summary_local_source_root_edit.text(),
         )
         rho_limit = self.common_rho_axis_limit_um
-        text, details = self.preview_canvas.plot_selection(
-            preview_row,
-            self.summary_manifest,
-            rho_axis_limit_um=rho_limit,
-        )
+        try:
+            text, details = self.preview_canvas.plot_selection(
+                preview_row,
+                self.summary_manifest,
+                rho_axis_limit_um=rho_limit,
+            )
+        except ValueError as exc:
+            self.preview_canvas.clear_message(str(exc))
+            self.details_output.setPlainText(str(exc))
+            return
 
         detail_lines = [
             f"Workbook: {self.summary_workbook_path}" if self.summary_workbook_path is not None else "Workbook:",
-            f"Selected row: {row['run_name']} | {row['surf_id']} | {row['force_id']} | {row['surface_token']}",
+            (
+                f"Selected row: {self._summary_display_run_name()} | "
+                f"{row['surf_id']} | {row['force_id']} | {row['surface_token']}"
+            ),
             f"Source remap: {resolution_details['source_resolution_strategy']} | exists={resolution_details['source_exists']}",
             f"Original source file: {resolution_details['original_source_file']}",
             f"Coeff file: {details['coeff_file']}",
             f"Coeff remap: {resolution_details['coeff_resolution_strategy']} | exists={resolution_details['coeff_exists']}",
             f"Original coeff file: {resolution_details['original_coeff_file']}",
-            f"Sphere SSE: {details['sphere_sse']}",
-            f"Surface RMS: {details['surface_rms']}",
-            f"Residual RMS: {details['residual_rms']}",
+            f"Sphere RMS (um): {details['sphere_rms_um']}",
+            f"ZPBS residual RMS (um): {details['zpbs_residual_rms_um']}",
+            f"ZPBS residual cond: {details['zpbs_residual_cond']}",
             f"Applied normalization radius (um): {details['applied_norm_radius_um']}",
             f"Observed aperture radius (um): {details['observed_aperture_radius_um']}",
             "",
@@ -1920,7 +2069,9 @@ class BatchFitWindow(QMainWindow):
             self.subset_spec_combo.setEnabled(True)
         elif self.subset_workbook_path is not None:
             display_kind = display_label(SUBSET_KIND_LABELS, self.subset_workbook_kind)
-            self.subset_spec_combo.addItem(display_kind or self.subset_workbook_path.name, str(self.subset_workbook_path))
+            self.subset_spec_combo.addItem(
+                display_kind or self.subset_workbook_path.name, str(self.subset_workbook_path)
+            )
             self.subset_spec_combo.setCurrentIndex(0)
             self.subset_spec_combo.setEnabled(False)
         else:
@@ -2019,7 +2170,11 @@ class BatchFitWindow(QMainWindow):
     def _refresh_subset_surf_options(self) -> None:
         available = {row["surf_id"] for row in self.subset_rows if row.get("surf_id") in FOCUS_SURF_IDS}
         current = self._selected_subset_surf_id()
-        target = current if current in available else next((surf_id for surf_id in FOCUS_SURF_IDS if surf_id in available), None)
+        target = (
+            current
+            if current in available
+            else next((surf_id for surf_id in FOCUS_SURF_IDS if surf_id in available), None)
+        )
         for surf_id, button in self.subset_surf_buttons.items():
             button.blockSignals(True)
             button.setEnabled(surf_id in available)
@@ -2047,15 +2202,15 @@ class BatchFitWindow(QMainWindow):
         surf_id = self._selected_subset_surf_id()
         force_id = self.subset_force_combo.currentText()
         matching = [
-            row
-            for row in self.subset_rows
-            if row.get("surf_id") == surf_id and row.get("force_id") == force_id
+            row for row in self.subset_rows if row.get("surf_id") == surf_id and row.get("force_id") == force_id
         ]
-        available_suffixes = {
-            row["surface_token"][-1].upper() for row in matching if row.get("surface_token")
-        }
+        available_suffixes = {row["surface_token"][-1].upper() for row in matching if row.get("surface_token")}
         current = self._selected_subset_state_suffix()
-        target = current if current in available_suffixes else next((suffix for suffix in ("I", "D") if suffix in available_suffixes), None)
+        target = (
+            current
+            if current in available_suffixes
+            else next((suffix for suffix in ("I", "D") if suffix in available_suffixes), None)
+        )
         for suffix, button in self.subset_state_buttons.items():
             button.blockSignals(True)
             button.setEnabled(suffix in available_suffixes)
@@ -2104,9 +2259,7 @@ class BatchFitWindow(QMainWindow):
         return [
             row
             for row in self.subset_rows
-            if row.get("surf_id") == surf_id
-            and row.get("force_id") == force_id
-            and row.get("surface_token") == token
+            if row.get("surf_id") == surf_id and row.get("force_id") == force_id and row.get("surface_token") == token
         ]
 
     def _subset_display_rows(self) -> list[dict[str, str]]:
@@ -2252,7 +2405,11 @@ class BatchFitWindow(QMainWindow):
         if self.subset_workbook_kind == "drop_importance":
             detail = self.subset_canvas.plot_drop_importance(display_rows, selected_row)
         elif self.subset_workbook_kind in {"subset_path_greedy", "subset_path_ranked"}:
-            title = "Subset Path: Greedy Refit" if self.subset_workbook_kind == "subset_path_greedy" else "Subset Path: Ranked Refit"
+            title = (
+                "Subset Path: Greedy Refit"
+                if self.subset_workbook_kind == "subset_path_greedy"
+                else "Subset Path: Ranked Refit"
+            )
             detail = self.subset_canvas.plot_subset_path(display_rows, selected_row, title=title)
         elif self.subset_workbook_kind in {"mode_consistency_overall", "mode_consistency_by_surf_id"}:
             title = (

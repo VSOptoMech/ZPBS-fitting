@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xyz-surface-fitting-toolkit"
-version = "1.1.0"
+version = "1.2.0"
 description = "Standalone batch runner and GUI for XYZ surface fitting."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,6 +15,10 @@ dependencies = [
     "PyQt5>=5.15.11",
     "scipy>=1.17.0",
 ]
+
+[project.scripts]
+zpbs-batch-fit = "zpbs.cli.batch_cli:main"
+zpbs-batch-gui = "zpbs.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

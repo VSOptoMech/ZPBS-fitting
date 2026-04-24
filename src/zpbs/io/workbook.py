@@ -7,6 +7,23 @@ from pathlib import Path
 from zipfile import ZipFile
 
 XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+COMPACT_SUMMARY_COLUMNS = (
+    "source_file",
+    "output_coefficients_csv",
+    "force_id",
+    "surf_id",
+    "surface_token",
+    "applied_reference_radius_um",
+    "applied_normalization_radius_um",
+    "observed_aperture_radius_um",
+    "sphere_rms_um",
+    "sphere_mae_um",
+    "zpbs_residual_rms_um",
+    "zpbs_residual_cond",
+    "vertex_mismatch_z_um",
+    "vertex_um",
+    "vertex_residual_um",
+)
 
 
 def _xlsx_column_index(cell_ref: str) -> int:
@@ -130,6 +147,14 @@ def parse_run_manifest(summary_file: Path) -> dict[str, object]:
         return json.loads(manifest_path.read_text())
     except json.JSONDecodeError:
         return {}
+
+
+def is_compact_summary_rows(rows: list[dict[str, str]]) -> bool:
+    """Return True when workbook rows match the maintained compact summary schema."""
+    if not rows:
+        return False
+    headers = tuple(rows[0].keys())
+    return headers == COMPACT_SUMMARY_COLUMNS
 
 
 def detect_subset_workbook_kind(

@@ -894,6 +894,7 @@ def export_zernike_coefficients_csv(
     output_file: str | Path,
     *,
     design_id: str,
+    design_token: str | None = None,
     fea_id: str,
     surf_id: str,
     tension_mn: float | str,
@@ -911,6 +912,7 @@ def export_zernike_coefficients_csv(
         writer = csv.writer(csvfile, dialect="excel")
         for row in build_zernike_coefficients_rows(
             design_id=design_id,
+            design_token=design_token,
             fea_id=fea_id,
             surf_id=surf_id,
             tension_mn=tension_mn,
@@ -943,6 +945,7 @@ def _format_coefficient_csv_value(label: str, value: object) -> object:
 def build_zernike_coefficients_rows(
     *,
     design_id: str,
+    design_token: str | None = None,
     fea_id: str,
     surf_id: str,
     tension_mn: float | str,
@@ -953,8 +956,9 @@ def build_zernike_coefficients_rows(
     zernike_coefficients_mm: np.ndarray,
 ) -> list[tuple[str, object]]:
     """Build the notebook-style coefficient report rows shared by per-surface and batch exports."""
+    design_label = design_token or f"R01V{design_id}"
     rows: list[tuple[str, object]] = [
-        ("Design", f"R01V{design_id}"),
+        ("Design", design_label),
         ("FEA", fea_id),
         ("Surface", surf_id),
         ("Tension (mN)", str(tension_mn)),

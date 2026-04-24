@@ -82,6 +82,7 @@ Current maintained defaults:
 - radius rounding: on
 - Zernike coefficient rounding: `6` significant digits
 - Zernike fitting method: maintained `lstsq` only
+- GUI HDF5 export: off by default because HDF5 output includes raw point-cloud data and absolute source paths
 
 Default opt-out flags:
 
@@ -102,7 +103,7 @@ Typical contents:
 - `coefficients/` per-surface coefficient CSVs
 - `coefficients/ZPs_batch_report.csv`
 - optional `qa/` HTML output
-- optional HDF5 output if requested
+- optional HDF5 output if requested; treat it as raw-data-bearing and not public-shareable by default
 
 Per-surface coefficient CSVs include:
 
@@ -126,7 +127,7 @@ The public GUI supports three workflows:
 
 Public-release constraint:
 
-- `Inspect Subsets` remains disabled in this standalone public build
+- private subset-inspection tooling is not included in this standalone public build
 
 ### Run Batch
 

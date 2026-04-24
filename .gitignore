@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 batch_outputs/
 src/*.egg-info/
+*.h5
+*.hdf5

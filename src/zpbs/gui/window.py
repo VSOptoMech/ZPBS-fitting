@@ -41,7 +41,7 @@ from PyQt5.QtWidgets import (
 
 from ..common import format_mae_rms_display, is_focus_surface_family, validate_sphere_reference_configuration
 from ..io.xyz import collapse_identical_initial_inputs, parse_surface_metadata
-from .canvases import FitPreviewCanvas, NumericTableWidgetItem, OverviewPlotCanvas, SubsetPlotCanvas
+from .canvases import FitPreviewCanvas, NumericTableWidgetItem, OverviewPlotCanvas
 from .single_file import (
     SingleFileAnalysisRequest,
     SingleFileAnalysisResult,
@@ -53,14 +53,11 @@ from .support import (
     NORMALIZATION_MODE_LABELS,
     ROC_MODE_LABELS,
     SPHERE_FIT_MODE_LABELS,
-    SUBSET_KIND_LABELS,
-    display_label,
     format_metric,
     parse_optional_float,
 )
 from ..io.remap import infer_original_run_dir, infer_original_source_root, prepare_summary_row_for_preview
 from ..io.workbook import (
-    detect_subset_workbook_kind,
     is_compact_summary_rows,
     parse_inline_xlsx_rows,
     parse_run_manifest,
@@ -77,7 +74,7 @@ LARGE_BATCH_WARNING_THRESHOLD = 1000
 
 
 class BatchFitWindow(QMainWindow):
-    """Launcher, summary viewer, and subset omission inspector."""
+    """Launcher, single-file inspector, and summary viewer."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -93,13 +90,6 @@ class BatchFitWindow(QMainWindow):
         self.summary_manifest: dict[str, object] = {}
         self.summary_workbook_path: Path | None = None
         self.common_rho_axis_limit_um: float | None = None
-        self.subset_rows: list[dict[str, str]] = []
-        self.subset_manifest: dict[str, object] = {}
-        self.subset_workbook_path: Path | None = None
-        self.subset_workbook_kind = ""
-        self.subset_workbook_specs: list[dict[str, str]] = []
-        self.subset_spec_paths: dict[str, Path] = {}
-        self._subset_updating_spec_combo = False
         self.single_file_temp_root = Path(tempfile.mkdtemp(prefix="zpbs_single_file_"))
         self.single_file_candidates: list[Path] = []
         self.single_file_results_cache: dict[tuple[object, ...], SingleFileAnalysisResult] = {}
@@ -121,9 +111,6 @@ class BatchFitWindow(QMainWindow):
         tabs.addTab(self._build_runner_tab(), "Run Batch")
         tabs.addTab(self._build_single_file_tab(), "Single File")
         tabs.addTab(self._build_viewer_tab(), "Inspect Summary")
-        # Public release guard: subset inspection stays private.
-        if False:
-            tabs.addTab(self._build_subset_tab(), "Inspect Subsets")
 
         self.refresh_command_preview()
 
@@ -909,33 +896,6 @@ class BatchFitWindow(QMainWindow):
         layout.addWidget(splitter, stretch=1)
         return tab
 
-    def _build_subset_tab(self) -> QWidget:
-        tab = QWidget(self)
-        layout = QVBoxLayout(tab)
-        layout.addWidget(self._build_subset_loader_group())
-
-        splitter = QSplitter(self)
-        splitter.setChildrenCollapsible(False)
-
-        left = QWidget(self)
-        left_layout = QVBoxLayout(left)
-        left_layout.addWidget(self._build_subset_manifest_group())
-        left_layout.addWidget(self._build_subset_selection_group())
-        left_layout.addWidget(self._build_subset_table_group(), stretch=1)
-        left_layout.addWidget(self._build_subset_details_group(), stretch=1)
-        splitter.addWidget(left)
-
-        right = QWidget(self)
-        right_layout = QVBoxLayout(right)
-        self.subset_canvas = SubsetPlotCanvas(right)
-        self.subset_canvas.clear_message("Load a subset workbook emitted by zernike_subset_harness.py.")
-        right_layout.addWidget(self.subset_canvas, stretch=1)
-        splitter.addWidget(right)
-        splitter.setSizes([470, 870])
-
-        layout.addWidget(splitter, stretch=1)
-        return tab
-
     def _build_header(self) -> QWidget:
         widget = QWidget(self)
         layout = QVBoxLayout(widget)
@@ -960,7 +920,7 @@ class BatchFitWindow(QMainWindow):
 
         self.input_dir_edit = QLineEdit(self)
         self.output_dir_edit = QLineEdit(str(DEFAULT_OUTPUT_DIR), self)
-        self.h5_path_edit = QLineEdit("ardea_real_data_validation.h5", self)
+        self.h5_path_edit = QLineEdit("batch_results.h5", self)
         self.run_name_edit = QLineEdit(self._default_run_name(), self)
         self.glob_edit = QLineEdit("*_FVS_*.xyz", self)
 
@@ -1098,11 +1058,13 @@ class BatchFitWindow(QMainWindow):
         self.qa_report_check.setChecked(True)
         self.fail_fast_check = QCheckBox("Fail fast", self)
         self.h5_enabled_check = QCheckBox("Write HDF5", self)
-        self.h5_enabled_check.setChecked(True)
+        self.h5_enabled_check.setChecked(False)
         self.recursive_check.setToolTip("Search subdirectories under the input directory, not just the top level.")
         self.qa_report_check.setToolTip("Write an HTML gallery with thumbnail plots for quick visual inspection.")
         self.fail_fast_check.setToolTip("Stop the batch immediately on the first file error instead of continuing.")
-        self.h5_enabled_check.setToolTip("Append the batch results into the shared HDF5 file for later analysis.")
+        self.h5_enabled_check.setToolTip(
+            "Append raw point-cloud data and fit results into an HDF5 file. Leave off for public/shareable runs."
+        )
 
         for widget in (
             self.recursive_check,
@@ -1288,136 +1250,6 @@ class BatchFitWindow(QMainWindow):
         self.details_output.setReadOnly(True)
         self.details_output.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(self.details_output)
-        return group
-
-    def _build_subset_loader_group(self) -> QGroupBox:
-        group = QGroupBox("Subset Workbook", self)
-        layout = QHBoxLayout(group)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(6)
-        self.subset_file_edit = QLineEdit(self)
-        self.subset_load_button = QPushButton("Load Workbook", self)
-        self.subset_load_button.clicked.connect(self.load_subset_workbook)
-        layout.addWidget(QLabel("Subset workbook(.xlsx)"), stretch=0)
-        layout.addWidget(
-            self._with_browse_button(
-                self.subset_file_edit,
-                directory=False,
-                save=False,
-                xlsx=True,
-                on_selected=self.load_subset_workbook,
-            ),
-            stretch=1,
-        )
-        layout.addWidget(self.subset_load_button, stretch=0)
-        return group
-
-    def _build_subset_manifest_group(self) -> QGroupBox:
-        group = QGroupBox("Subset Run", self)
-        layout = QVBoxLayout(group)
-        self.subset_manifest_label = QLabel("No subset workbook loaded.")
-        self.subset_manifest_label.setWordWrap(True)
-        self.subset_manifest_label.setProperty("themeRole", "mutedText")
-        self.subset_manifest_label.setStyleSheet(f"color: {self._muted_text_color()};")
-        layout.addWidget(self.subset_manifest_label)
-        return group
-
-    def _build_subset_selection_group(self) -> QGroupBox:
-        group = QGroupBox("Subset Selection", self)
-        layout = QVBoxLayout(group)
-
-        workbook_row = QWidget(self)
-        workbook_layout = QHBoxLayout(workbook_row)
-        workbook_layout.setContentsMargins(0, 0, 0, 0)
-        workbook_layout.addWidget(QLabel("Workbook Kind"))
-        self.subset_spec_combo = QComboBox(self)
-        self.subset_spec_combo.currentIndexChanged.connect(self._on_subset_spec_changed)
-        workbook_layout.addWidget(self.subset_spec_combo, stretch=1)
-        layout.addWidget(workbook_row)
-
-        surf_widget = QWidget(self)
-        surf_layout = QHBoxLayout(surf_widget)
-        surf_layout.setContentsMargins(0, 0, 0, 0)
-        surf_layout.addWidget(QLabel("Surface Family"))
-        self.subset_surf_buttons: dict[str, QPushButton] = {}
-        for surf_id in FOCUS_SURF_IDS:
-            button = QPushButton(surf_id, self)
-            button.setCheckable(True)
-            button.setAutoExclusive(True)
-            button.setEnabled(False)
-            button.clicked.connect(self._refresh_subset_force_options)
-            self.subset_surf_buttons[surf_id] = button
-            surf_layout.addWidget(button)
-        surf_layout.addStretch(1)
-        layout.addWidget(surf_widget)
-
-        force_widget = QWidget(self)
-        force_layout = QHBoxLayout(force_widget)
-        force_layout.setContentsMargins(0, 0, 0, 0)
-        force_layout.addWidget(QLabel("Force"))
-        self.subset_prev_force_button = QPushButton("Prev", self)
-        self.subset_prev_force_button.setMaximumWidth(60)
-        self.subset_force_combo = QComboBox(self)
-        self.subset_force_combo.currentTextChanged.connect(self._refresh_subset_state_options)
-        self.subset_next_force_button = QPushButton("Next", self)
-        self.subset_next_force_button.setMaximumWidth(60)
-        self.subset_prev_force_button.clicked.connect(lambda: self._navigate_subset_force(-1))
-        self.subset_next_force_button.clicked.connect(lambda: self._navigate_subset_force(1))
-        force_layout.addWidget(self.subset_prev_force_button)
-        force_layout.addWidget(self.subset_force_combo, stretch=1)
-        force_layout.addWidget(self.subset_next_force_button)
-        layout.addWidget(force_widget)
-
-        state_widget = QWidget(self)
-        state_layout = QHBoxLayout(state_widget)
-        state_layout.setContentsMargins(0, 0, 0, 0)
-        state_layout.addWidget(QLabel("Surface State"))
-        self.subset_state_buttons: dict[str, QPushButton] = {}
-        for suffix, label in (("I", "Initial"), ("D", "Deformed")):
-            button = QPushButton(label, self)
-            button.setCheckable(True)
-            button.setAutoExclusive(True)
-            button.setEnabled(False)
-            button.clicked.connect(self.refresh_subset_view)
-            self.subset_state_buttons[suffix] = button
-            state_layout.addWidget(button)
-        state_layout.addStretch(1)
-        layout.addWidget(state_widget)
-
-        filter_widget = QWidget(self)
-        filter_layout = QHBoxLayout(filter_widget)
-        filter_layout.setContentsMargins(0, 0, 0, 0)
-        filter_layout.addWidget(QLabel("Surf Filter"))
-        self.subset_group_filter_combo = QComboBox(self)
-        self.subset_group_filter_combo.currentTextChanged.connect(self.refresh_subset_view)
-        filter_layout.addWidget(self.subset_group_filter_combo, stretch=1)
-        filter_layout.addWidget(QLabel("Removed Count"))
-        self.subset_removed_count_combo = QComboBox(self)
-        self.subset_removed_count_combo.currentTextChanged.connect(self._render_subset_from_current_table_selection)
-        filter_layout.addWidget(self.subset_removed_count_combo, stretch=1)
-        layout.addWidget(filter_widget)
-        return group
-
-    def _build_subset_table_group(self) -> QGroupBox:
-        group = QGroupBox("Subset Table", self)
-        layout = QVBoxLayout(group)
-        self.subset_table = QTableWidget(self)
-        self.subset_table.setColumnCount(0)
-        self.subset_table.setRowCount(0)
-        self.subset_table.setSortingEnabled(True)
-        self.subset_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.subset_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.subset_table.itemSelectionChanged.connect(self._render_subset_from_current_table_selection)
-        layout.addWidget(self.subset_table)
-        return group
-
-    def _build_subset_details_group(self) -> QGroupBox:
-        group = QGroupBox("Subset Details", self)
-        layout = QVBoxLayout(group)
-        self.subset_details_output = QPlainTextEdit(self)
-        self.subset_details_output.setReadOnly(True)
-        self.subset_details_output.setLineWrapMode(QPlainTextEdit.NoWrap)
-        layout.addWidget(self.subset_details_output)
         return group
 
     def _with_browse_button(
@@ -1996,466 +1828,6 @@ class BatchFitWindow(QMainWindow):
         has_items = count > 0 and current_index >= 0
         self.prev_force_button.setEnabled(has_items and current_index > 0)
         self.next_force_button.setEnabled(has_items and current_index < count - 1)
-
-    def load_subset_workbook(self) -> None:
-        # Public release guard: subset inspection is intentionally disabled.
-        QMessageBox.information(
-            self,
-            "Subset Inspection Disabled",
-            "Subset inspection is disabled in this public release.",
-        )
-        return
-
-        path_text = self.subset_file_edit.text().strip()
-        if not path_text:
-            QMessageBox.warning(self, "Missing Workbook", "Choose a subset workbook.")
-            return
-        path = Path(path_text)
-        if not path.exists():
-            QMessageBox.warning(self, "Missing Workbook", f"Subset workbook not found:\n{path}")
-            return
-
-        rows = parse_inline_xlsx_rows(path)
-        if not rows:
-            QMessageBox.warning(self, "No Rows", "The selected subset workbook contains no rows.")
-            return
-
-        filtered_rows: list[dict[str, str]] = []
-        for row in rows:
-            surf_id = row.get("surf_id", "").strip()
-            group_value = row.get("group_value", "").strip()
-            group_type = row.get("group_type", "").strip()
-            if surf_id and surf_id not in FOCUS_SURF_IDS:
-                continue
-            if group_type == "surf_id" and group_value and group_value not in FOCUS_SURF_IDS:
-                continue
-            filtered_rows.append(row)
-
-        manifest = parse_run_manifest(path)
-        self.subset_workbook_path = path
-        self.subset_rows = filtered_rows
-        self.subset_manifest = manifest
-        self.subset_workbook_kind = detect_subset_workbook_kind(filtered_rows, path, manifest)
-        self.subset_workbook_specs = list(manifest.get("gui_workbook_specs", []) or [])
-        self._populate_subset_spec_combo()
-        self._update_subset_manifest_label()
-        self._configure_subset_controls()
-        self.refresh_subset_view()
-
-    def _populate_subset_spec_combo(self) -> None:
-        self._subset_updating_spec_combo = True
-        self.subset_spec_combo.blockSignals(True)
-        self.subset_spec_combo.clear()
-        self.subset_spec_paths = {}
-
-        if self.subset_workbook_specs and self.subset_workbook_path is not None:
-            run_dir = self.subset_workbook_path.parent
-            for spec in self.subset_workbook_specs:
-                file_name = str(spec.get("file", ""))
-                kind = str(spec.get("kind", ""))
-                description = str(spec.get("description", ""))
-                display_kind = display_label(SUBSET_KIND_LABELS, kind)
-                label = f"{display_kind} | {description}" if description else display_kind
-                target_path = run_dir / file_name
-                self.subset_spec_combo.addItem(label, str(target_path))
-                self.subset_spec_paths[label] = target_path
-            current_index = 0
-            for index in range(self.subset_spec_combo.count()):
-                current_path = Path(str(self.subset_spec_combo.itemData(index)))
-                if current_path == self.subset_workbook_path:
-                    current_index = index
-                    break
-            self.subset_spec_combo.setCurrentIndex(current_index)
-            self.subset_spec_combo.setEnabled(True)
-        elif self.subset_workbook_path is not None:
-            display_kind = display_label(SUBSET_KIND_LABELS, self.subset_workbook_kind)
-            self.subset_spec_combo.addItem(
-                display_kind or self.subset_workbook_path.name, str(self.subset_workbook_path)
-            )
-            self.subset_spec_combo.setCurrentIndex(0)
-            self.subset_spec_combo.setEnabled(False)
-        else:
-            self.subset_spec_combo.setEnabled(False)
-
-        self.subset_spec_combo.blockSignals(False)
-        self._subset_updating_spec_combo = False
-
-    def _on_subset_spec_changed(self) -> None:
-        if self._subset_updating_spec_combo:
-            return
-        selected_path = self.subset_spec_combo.currentData()
-        if not selected_path:
-            return
-        target_path = Path(str(selected_path))
-        if self.subset_workbook_path is not None and target_path == self.subset_workbook_path:
-            return
-        self.subset_file_edit.setText(str(target_path))
-        self.load_subset_workbook()
-
-    def _update_subset_manifest_label(self) -> None:
-        if not self.subset_rows:
-            self.subset_manifest_label.setText("No subset workbook loaded.")
-            return
-        run_name = str(self.subset_manifest.get("run_name") or self.subset_rows[0].get("run_name", ""))
-        normalization_mode = str(
-            self.subset_manifest.get("normalization_mode") or self.subset_rows[0].get("normalization_mode", "")
-        )
-        targets = sorted({row.get("target", "") for row in self.subset_rows if row.get("target")})
-        target = str(self.subset_manifest.get("target_pattern") or ", ".join(targets) or "n/a")
-        source_count = self.subset_manifest.get("source_count")
-        if source_count in (None, "", "null"):
-            source_count = len({row.get("source_label", "") for row in self.subset_rows if row.get("source_label")})
-        display_kind = display_label(SUBSET_KIND_LABELS, self.subset_workbook_kind)
-        display_norm = display_label(NORMALIZATION_MODE_LABELS, normalization_mode) if normalization_mode else "n/a"
-        self.subset_manifest_label.setText(
-            f"Run: {run_name} | Kind: {display_kind} | "
-            f"Normalization: {display_norm} | Target: {target} | "
-            f"Source count: {source_count or 'n/a'}"
-        )
-
-    def _configure_subset_controls(self) -> None:
-        per_source_kind = self.subset_workbook_kind in {
-            "drop_importance",
-            "subset_path_greedy",
-            "subset_path_ranked",
-            "global_consistent_subset",
-        }
-        surf_filter_kind = self.subset_workbook_kind == "mode_consistency_by_surf_id"
-        removed_count_kind = self.subset_workbook_kind in {"global_mode_order", "global_consistent_subset_aggregate"}
-
-        if per_source_kind:
-            self._refresh_subset_surf_options()
-        else:
-            for button in self.subset_surf_buttons.values():
-                button.setEnabled(False)
-                button.setChecked(False)
-            self.subset_force_combo.clear()
-            for button in self.subset_state_buttons.values():
-                button.setEnabled(False)
-                button.setChecked(False)
-            self._update_subset_force_navigation_buttons()
-
-        self.subset_group_filter_combo.blockSignals(True)
-        self.subset_group_filter_combo.clear()
-        if surf_filter_kind:
-            self.subset_group_filter_combo.addItems(["All", *FOCUS_SURF_IDS])
-            self.subset_group_filter_combo.setEnabled(True)
-        else:
-            self.subset_group_filter_combo.addItem("All")
-            self.subset_group_filter_combo.setEnabled(False)
-        self.subset_group_filter_combo.blockSignals(False)
-
-        self.subset_removed_count_combo.blockSignals(True)
-        self.subset_removed_count_combo.clear()
-        if removed_count_kind:
-            if self.subset_workbook_kind == "global_mode_order":
-                max_count = len(self.subset_rows)
-                self.subset_removed_count_combo.addItems([str(count) for count in range(0, max_count + 1)])
-            else:
-                counts = sorted(
-                    {
-                        int(float(row.get("removed_mode_count", "0")))
-                        for row in self.subset_rows
-                        if row.get("removed_mode_count", "").strip()
-                    }
-                )
-                self.subset_removed_count_combo.addItems([str(count) for count in counts])
-            self.subset_removed_count_combo.setEnabled(True)
-            if self.subset_removed_count_combo.count() > 0:
-                self.subset_removed_count_combo.setCurrentIndex(0)
-        else:
-            self.subset_removed_count_combo.setEnabled(False)
-        self.subset_removed_count_combo.blockSignals(False)
-
-    def _refresh_subset_surf_options(self) -> None:
-        available = {row["surf_id"] for row in self.subset_rows if row.get("surf_id") in FOCUS_SURF_IDS}
-        current = self._selected_subset_surf_id()
-        target = (
-            current
-            if current in available
-            else next((surf_id for surf_id in FOCUS_SURF_IDS if surf_id in available), None)
-        )
-        for surf_id, button in self.subset_surf_buttons.items():
-            button.blockSignals(True)
-            button.setEnabled(surf_id in available)
-            button.setChecked(surf_id == target)
-            button.blockSignals(False)
-        self._refresh_subset_force_options()
-
-    def _refresh_subset_force_options(self) -> None:
-        surf_id = self._selected_subset_surf_id()
-        matching = [row for row in self.subset_rows if row.get("surf_id") == surf_id]
-        force_ids = sorted({row["force_id"] for row in matching if row.get("force_id")}, key=self._force_sort_key)
-        current = self.subset_force_combo.currentText()
-        self.subset_force_combo.blockSignals(True)
-        self.subset_force_combo.clear()
-        self.subset_force_combo.addItems(force_ids)
-        if current in force_ids:
-            self.subset_force_combo.setCurrentText(current)
-        elif force_ids:
-            self.subset_force_combo.setCurrentIndex(0)
-        self.subset_force_combo.blockSignals(False)
-        self._update_subset_force_navigation_buttons()
-        self._refresh_subset_state_options()
-
-    def _refresh_subset_state_options(self) -> None:
-        surf_id = self._selected_subset_surf_id()
-        force_id = self.subset_force_combo.currentText()
-        matching = [
-            row for row in self.subset_rows if row.get("surf_id") == surf_id and row.get("force_id") == force_id
-        ]
-        available_suffixes = {row["surface_token"][-1].upper() for row in matching if row.get("surface_token")}
-        current = self._selected_subset_state_suffix()
-        target = (
-            current
-            if current in available_suffixes
-            else next((suffix for suffix in ("I", "D") if suffix in available_suffixes), None)
-        )
-        for suffix, button in self.subset_state_buttons.items():
-            button.blockSignals(True)
-            button.setEnabled(suffix in available_suffixes)
-            button.setChecked(suffix == target)
-            button.blockSignals(False)
-        self._update_subset_force_navigation_buttons()
-        self.refresh_subset_view()
-
-    def _selected_subset_surf_id(self) -> str:
-        for surf_id, button in self.subset_surf_buttons.items():
-            if button.isChecked():
-                return surf_id
-        return ""
-
-    def _selected_subset_state_suffix(self) -> str:
-        for suffix, button in self.subset_state_buttons.items():
-            if button.isChecked():
-                return suffix
-        return ""
-
-    def _navigate_subset_force(self, step: int) -> None:
-        if self.subset_force_combo.count() == 0:
-            return
-        current_index = self.subset_force_combo.currentIndex()
-        if current_index < 0:
-            current_index = 0
-        new_index = min(max(current_index + step, 0), self.subset_force_combo.count() - 1)
-        if new_index != current_index:
-            self.subset_force_combo.setCurrentIndex(new_index)
-        self._update_subset_force_navigation_buttons()
-
-    def _update_subset_force_navigation_buttons(self) -> None:
-        count = self.subset_force_combo.count()
-        current_index = self.subset_force_combo.currentIndex()
-        has_items = count > 0 and current_index >= 0
-        self.subset_prev_force_button.setEnabled(has_items and current_index > 0)
-        self.subset_next_force_button.setEnabled(has_items and current_index < count - 1)
-
-    def _current_subset_source_rows(self) -> list[dict[str, str]]:
-        surf_id = self._selected_subset_surf_id()
-        force_id = self.subset_force_combo.currentText()
-        suffix = self._selected_subset_state_suffix()
-        if not surf_id or not force_id or not suffix:
-            return []
-        token = f"{surf_id}{suffix}"
-        return [
-            row
-            for row in self.subset_rows
-            if row.get("surf_id") == surf_id and row.get("force_id") == force_id and row.get("surface_token") == token
-        ]
-
-    def _subset_display_rows(self) -> list[dict[str, str]]:
-        if self.subset_workbook_kind in {
-            "drop_importance",
-            "subset_path_greedy",
-            "subset_path_ranked",
-            "global_consistent_subset",
-        }:
-            return self._current_subset_source_rows()
-        if self.subset_workbook_kind == "mode_consistency_by_surf_id":
-            selected_filter = self.subset_group_filter_combo.currentText()
-            if selected_filter and selected_filter != "All":
-                return [row for row in self.subset_rows if row.get("group_value") == selected_filter]
-        return list(self.subset_rows)
-
-    def _table_columns_for_subset_kind(self, kind: str) -> list[tuple[str, str]]:
-        if kind == "drop_importance":
-            return [
-                ("impact_rank", "Rank"),
-                ("removed_mode_noll", "Removed"),
-                ("full_fit_abs_coefficient_um", "|Coeff|"),
-                ("subset_rms", "Subset RMS"),
-                ("delta_rms_vs_full", "dRMS"),
-                ("delta_max_abs_residual_um_vs_full", "dMax Abs"),
-            ]
-        if kind in {"subset_path_greedy", "subset_path_ranked"}:
-            return [
-                ("step_index", "Step"),
-                ("active_mode_count", "Active"),
-                ("removed_mode_noll", "Removed"),
-                ("rms", "Subset RMS"),
-                ("delta_rms_vs_full", "dRMS"),
-                ("delta_max_abs_residual_um_vs_full", "dMax Abs"),
-            ]
-        if kind in {"mode_consistency_overall", "mode_consistency_by_surf_id"}:
-            return [
-                ("mode_noll", "Mode"),
-                ("sample_count", "N"),
-                ("median_rank", "Median Rank"),
-                ("top1_count", "Top1"),
-                ("top3_count", "Top3"),
-                ("top5_count", "Top5"),
-                ("p95_delta_rms", "p95 dRMS"),
-                ("max_delta_rms", "max dRMS"),
-            ]
-        if kind == "global_mode_order":
-            return [
-                ("global_order", "Order"),
-                ("mode_noll", "Mode"),
-                ("median_rank", "Median Rank"),
-                ("top1_count", "Top1"),
-                ("top3_count", "Top3"),
-                ("p95_delta_rms", "p95 dRMS"),
-                ("max_delta_rms", "max dRMS"),
-            ]
-        if kind == "global_consistent_subset":
-            return [
-                ("removed_mode_count", "Removed"),
-                ("active_mode_count", "Active"),
-                ("last_removed_mode_noll", "Last Removed"),
-                ("rms", "Subset RMS"),
-                ("delta_rms_vs_full", "dRMS"),
-                ("delta_max_abs_residual_um_vs_full", "dMax Abs"),
-            ]
-        if kind == "global_consistent_subset_aggregate":
-            return [
-                ("removed_mode_count", "Removed"),
-                ("active_mode_count", "Active"),
-                ("median_delta_rms", "Median dRMS"),
-                ("p95_delta_rms", "p95 dRMS"),
-                ("max_delta_rms", "max dRMS"),
-                ("worst_case_surface_token", "Worst Token"),
-            ]
-        return []
-
-    def _populate_subset_table(self, rows: list[dict[str, str]]) -> dict[str, str] | None:
-        columns = self._table_columns_for_subset_kind(self.subset_workbook_kind)
-        self.subset_table.blockSignals(True)
-        self.subset_table.setSortingEnabled(False)
-        self.subset_table.clear()
-        self.subset_table.setColumnCount(len(columns))
-        self.subset_table.setHorizontalHeaderLabels([label for _field, label in columns])
-        self.subset_table.setRowCount(len(rows))
-
-        for row_index, row in enumerate(rows):
-            for column_index, (field, _label) in enumerate(columns):
-                raw_value = row.get(field, "")
-                numeric = parse_optional_float(str(raw_value)) if str(raw_value).strip() else None
-                display = format_metric(numeric if numeric is not None else raw_value)
-                sort_value: float | int | str = numeric if numeric is not None else str(raw_value)
-                item = NumericTableWidgetItem(display, sort_value)
-                if column_index == 0:
-                    item.setData(Qt.UserRole, row)
-                self.subset_table.setItem(row_index, column_index, item)
-
-        self.subset_table.resizeColumnsToContents()
-        self.subset_table.setSortingEnabled(True)
-        selected_row = rows[0] if rows else None
-        if rows:
-            self.subset_table.selectRow(0)
-        self.subset_table.blockSignals(False)
-        return selected_row
-
-    def _current_subset_table_row(self) -> dict[str, str] | None:
-        selected_items = self.subset_table.selectedItems()
-        if not selected_items:
-            return None
-        return selected_items[0].data(Qt.UserRole)
-
-    def refresh_subset_view(self) -> None:
-        if not self.subset_rows:
-            self.subset_canvas.clear_message("Load a subset workbook to inspect omission results.")
-            self.subset_details_output.setPlainText("No subset workbook loaded.")
-            return
-
-        display_rows = self._subset_display_rows()
-        if not display_rows:
-            self.subset_canvas.clear_message("No rows match the current subset filters.")
-            self.subset_details_output.setPlainText("No subset rows match the current selection.")
-            self.subset_table.blockSignals(True)
-            self.subset_table.clear()
-            self.subset_table.setRowCount(0)
-            self.subset_table.setColumnCount(0)
-            self.subset_table.blockSignals(False)
-            return
-
-        self._populate_subset_table(display_rows)
-        self._render_subset_from_current_table_selection()
-
-    def _render_subset_from_current_table_selection(self) -> None:
-        if not self.subset_rows:
-            return
-        display_rows = self._subset_display_rows()
-        if not display_rows:
-            return
-
-        selected_row = self._current_subset_table_row()
-        if selected_row is None:
-            selected_row = display_rows[0]
-
-        detail = ""
-        if self.subset_workbook_kind == "drop_importance":
-            detail = self.subset_canvas.plot_drop_importance(display_rows, selected_row)
-        elif self.subset_workbook_kind in {"subset_path_greedy", "subset_path_ranked"}:
-            title = (
-                "Subset Path: Greedy Refit"
-                if self.subset_workbook_kind == "subset_path_greedy"
-                else "Subset Path: Ranked Refit"
-            )
-            detail = self.subset_canvas.plot_subset_path(display_rows, selected_row, title=title)
-        elif self.subset_workbook_kind in {"mode_consistency_overall", "mode_consistency_by_surf_id"}:
-            title = (
-                "Mode Consistency by Surface Family"
-                if self.subset_workbook_kind == "mode_consistency_by_surf_id"
-                else "Mode Consistency Overall"
-            )
-            detail = self.subset_canvas.plot_mode_consistency(display_rows, selected_row, title=title)
-        elif self.subset_workbook_kind == "global_mode_order":
-            prefix_text = self.subset_removed_count_combo.currentText().strip()
-            prefix_count = int(prefix_text) if prefix_text else 0
-            detail = self.subset_canvas.plot_global_mode_order(display_rows, prefix_count=prefix_count)
-            if selected_row is not None:
-                detail = (
-                    f"{detail}\nSelected row: order={selected_row.get('global_order', '')}, "
-                    f"mode=Z{selected_row.get('mode_noll', '')}, "
-                    f"p95_delta_rms={format_metric(parse_optional_float(selected_row.get('p95_delta_rms', '')) or 0.0)}"
-                )
-        elif self.subset_workbook_kind == "global_consistent_subset_aggregate":
-            selected_text = self.subset_removed_count_combo.currentText().strip()
-            selected_count = int(selected_text) if selected_text else None
-            detail = self.subset_canvas.plot_global_subset_aggregate(display_rows, selected_count=selected_count)
-            if selected_row is not None:
-                detail = (
-                    f"{detail}\nSelected row: removed={selected_row.get('removed_mode_count', '')}, "
-                    f"median={format_metric(parse_optional_float(selected_row.get('median_delta_rms', '')) or 0.0)}, "
-                    f"p95={format_metric(parse_optional_float(selected_row.get('p95_delta_rms', '')) or 0.0)}"
-                )
-        elif self.subset_workbook_kind == "global_consistent_subset":
-            detail = self.subset_canvas.plot_global_subset_source(display_rows, selected_row)
-        else:
-            self.subset_canvas.clear_message(f"Unsupported subset workbook kind: {self.subset_workbook_kind}")
-            detail = f"Unsupported subset workbook kind: {self.subset_workbook_kind}"
-
-        source_label = selected_row.get("source_label", "") if selected_row is not None else ""
-        self.subset_details_output.setPlainText(
-            "\n".join(
-                [
-                    f"Workbook: {self.subset_workbook_path}" if self.subset_workbook_path is not None else "Workbook:",
-                    f"Kind: {self.subset_workbook_kind}",
-                    f"Selected source: {source_label or 'aggregate view'}",
-                    "",
-                    detail,
-                ]
-            )
-        )
 
     @staticmethod
     def _force_sort_key(force_id: str) -> tuple[float, str]:

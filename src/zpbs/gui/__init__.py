@@ -6,12 +6,11 @@ from PyQt5.QtWidgets import QApplication
 
 from ..io.remap import prepare_summary_row_for_preview
 from ..io.workbook import parse_inline_xlsx_rows
-from .canvases import FitPreviewCanvas, NumericTableWidgetItem, OverviewPlotCanvas, SubsetPlotCanvas
+from .canvases import FitPreviewCanvas, NumericTableWidgetItem, OverviewPlotCanvas
 from .support import (
     NORMALIZATION_MODE_LABELS,
     ROC_MODE_LABELS,
     SPHERE_FIT_MODE_LABELS,
-    SUBSET_KIND_LABELS,
     display_label,
     format_metric,
     parse_int_list_text,
@@ -35,14 +34,12 @@ __all__ = [
     "FitPreviewCanvas",
     "NumericTableWidgetItem",
     "OverviewPlotCanvas",
-    "SubsetPlotCanvas",
     "main",
     "parse_inline_xlsx_rows",
     "prepare_summary_row_for_preview",
     "NORMALIZATION_MODE_LABELS",
     "ROC_MODE_LABELS",
     "SPHERE_FIT_MODE_LABELS",
-    "SUBSET_KIND_LABELS",
     "display_label",
     "format_metric",
     "parse_int_list_text",

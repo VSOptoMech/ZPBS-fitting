@@ -375,6 +375,7 @@ def build_fit_artifacts(
     export_zernike_coefficients_csv(
         coeff_path,
         design_id=metadata.design_id,
+        design_token=metadata.design_token,
         fea_id=metadata.fea_id,
         surf_id=metadata.surf_id,
         tension_mn=format_tension(metadata.force_id),

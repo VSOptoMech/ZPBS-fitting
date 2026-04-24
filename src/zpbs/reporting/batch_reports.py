@@ -82,6 +82,7 @@ def write_batch_zp_report(file_path: Path, artifacts: list[FitArtifacts]) -> Pat
         )
         rows = build_zernike_coefficients_rows(
             design_id=item.metadata.design_id,
+            design_token=item.metadata.design_token,
             fea_id=item.metadata.fea_id,
             surf_id=item.metadata.surf_id,
             tension_mn=format_tension(item.metadata.force_id),

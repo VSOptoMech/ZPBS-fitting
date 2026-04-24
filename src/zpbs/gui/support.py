@@ -22,18 +22,6 @@ NORMALIZATION_MODE_LABELS = {
     "per-file": "Per-File Aperture",
     "common-per-surf-id": "Shared Aperture by Surface Family",
 }
-SUBSET_KIND_LABELS = {
-    "drop_importance": "Single-Mode Drop Importance",
-    "subset_path_greedy": "Greedy Subset Path",
-    "subset_path_ranked": "Ranked Subset Path",
-    "mode_consistency_overall": "Mode Consistency Overview",
-    "mode_consistency_by_surf_id": "Mode Consistency by Surface Family",
-    "global_mode_order": "Global Mode Order",
-    "global_consistent_subset": "Global Consistent Subset",
-    "global_consistent_subset_aggregate": "Global Consistent Subset Aggregate",
-}
-
-
 def display_label(mapping: dict[str, str], value: str) -> str:
     """Return the human-friendly display label for one persisted token."""
     return mapping.get(value, value)

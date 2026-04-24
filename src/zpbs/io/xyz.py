@@ -113,14 +113,15 @@ def load_xyz_point_cloud(file_path: Path) -> tuple[list[float], list[float], lis
 
 
 def collapse_identical_initial_inputs(files: list[Path]) -> list[ProcessingInput]:
-    """Collapse identical *I files to one synthetic zero-force entry per surface family."""
-    initial_groups: dict[str, list[tuple[Path, SurfaceMetadata]]] = {}
+    """Collapse identical *I files to one synthetic zero-force entry per design and surface state."""
+    initial_groups: dict[tuple[str, str, str, str], list[tuple[Path, SurfaceMetadata]]] = {}
     processing_inputs: list[ProcessingInput] = []
 
     for file_path in files:
         metadata = parse_surface_metadata(file_path)
         if metadata.surface_token.endswith("I"):
-            initial_groups.setdefault(metadata.surf_id, []).append((file_path, metadata))
+            group_key = (metadata.design_token, metadata.fea_id, metadata.surf_id, metadata.surface_token)
+            initial_groups.setdefault(group_key, []).append((file_path, metadata))
             continue
         processing_inputs.append(
             ProcessingInput(
@@ -130,7 +131,8 @@ def collapse_identical_initial_inputs(files: list[Path]) -> list[ProcessingInput
             )
         )
 
-    for surf_id, members in sorted(initial_groups.items()):
+    for group_key, members in sorted(initial_groups.items()):
+        _design_token, _fea_id, surf_id, _surface_token = group_key
         surface_tokens = {metadata.surface_token for _, metadata in members}
         if len(surface_tokens) != 1:
             raise ValueError(

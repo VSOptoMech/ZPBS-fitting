@@ -1687,6 +1687,112 @@ class BatchFitWindow(QMainWindow):
             return self.summary_workbook_path.stem
         return "summary_preview"
 
+    @staticmethod
+    def _has_actual_summary_remap(strategy: str) -> bool:
+        return strategy not in {"", "workbook", "summary-relative"}
+
+    @staticmethod
+    def _split_preview_detail_text(text: str) -> tuple[dict[str, str], list[str]]:
+        fields: dict[str, str] = {}
+        top_coeff_lines: list[str] = []
+        reading_top_coeffs = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line == "Top coeffs:":
+                reading_top_coeffs = True
+                continue
+            if reading_top_coeffs:
+                top_coeff_lines.append(raw_line.strip())
+                continue
+            if ": " in line:
+                label, value = line.split(": ", maxsplit=1)
+                fields[label] = value
+        return fields, top_coeff_lines
+
+    def _summary_selection_detail_lines(
+        self,
+        *,
+        row: dict[str, str],
+        resolution_details: dict[str, str],
+        preview_text: str,
+        preview_details: dict[str, str],
+    ) -> list[str]:
+        fields, top_coeff_lines = self._split_preview_detail_text(preview_text)
+        source_remapped = self._has_actual_summary_remap(resolution_details["source_resolution_strategy"])
+        coeff_remapped = self._has_actual_summary_remap(resolution_details["coeff_resolution_strategy"])
+
+        detail_lines = [
+            "Key fit details",
+            (
+                f"Selected row: {self._summary_display_run_name()} | "
+                f"{row['surf_id']} | {row['force_id']} | {row['surface_token']}"
+            ),
+        ]
+
+        for label in (
+            "File",
+            "Surface",
+            "Force",
+            "ROC mode",
+            "Sphere fit mode",
+            "Center weight",
+            "Norm mode",
+            "Fitted sphere radius",
+            "Applied norm radius",
+            "Observed aperture radius",
+        ):
+            if label in fields:
+                detail_lines.append(f"{label}: {fields[label]}")
+
+        if top_coeff_lines:
+            detail_lines.extend(["Top Zernike coefficients:", *top_coeff_lines])
+
+        detail_lines.extend(["", "Sphere geometry"])
+        for label in ("Sphere center", "Target vertex", "Reference vertex", "Vertex mismatch z"):
+            if label in fields:
+                detail_lines.append(f"{label}: {fields[label]}")
+
+        detail_lines.extend(
+            [
+                "",
+                "Workbook and replay",
+                f"Workbook path: {self.summary_workbook_path}"
+                if self.summary_workbook_path is not None
+                else "Workbook path:",
+            ]
+        )
+        if source_remapped:
+            detail_lines.extend(
+                [
+                    f"Original source file: {resolution_details['original_source_file']}",
+                    f"Resolved source file: {resolution_details['resolved_source_file']}",
+                ]
+            )
+        if coeff_remapped:
+            detail_lines.extend(
+                [
+                    f"Coefficient remap: {resolution_details['coeff_resolution_strategy']} | exists={resolution_details['coeff_exists']}",
+                    f"Original coefficient file: {resolution_details['original_coeff_file']}",
+                ]
+            )
+
+        detail_lines.extend(
+            [
+                "",
+                "Diagnostics and locations",
+                f"Sphere RMS (um): {preview_details['sphere_rms_um']}",
+                f"ZPBS residual RMS (um): {preview_details['zpbs_residual_rms_um']}",
+                f"ZPBS residual cond: {preview_details['zpbs_residual_cond']}",
+            ]
+        )
+        if "Coeff metadata radius" in fields:
+            detail_lines.append(f"Coefficient metadata radius: {fields['Coeff metadata radius']}")
+        if coeff_remapped:
+            detail_lines.append(f"Coefficient file: {preview_details['coeff_file']}")
+        return detail_lines
+
     def _refresh_surf_options(self) -> None:
         available = {row["surf_id"] for row in self.summary_rows}
         current = self._selected_surf_id()
@@ -1778,25 +1884,12 @@ class BatchFitWindow(QMainWindow):
             self.details_output.setPlainText(str(exc))
             return
 
-        detail_lines = [
-            f"Workbook: {self.summary_workbook_path}" if self.summary_workbook_path is not None else "Workbook:",
-            (
-                f"Selected row: {self._summary_display_run_name()} | "
-                f"{row['surf_id']} | {row['force_id']} | {row['surface_token']}"
-            ),
-            f"Source remap: {resolution_details['source_resolution_strategy']} | exists={resolution_details['source_exists']}",
-            f"Original source file: {resolution_details['original_source_file']}",
-            f"Coeff file: {details['coeff_file']}",
-            f"Coeff remap: {resolution_details['coeff_resolution_strategy']} | exists={resolution_details['coeff_exists']}",
-            f"Original coeff file: {resolution_details['original_coeff_file']}",
-            f"Sphere RMS (um): {details['sphere_rms_um']}",
-            f"ZPBS residual RMS (um): {details['zpbs_residual_rms_um']}",
-            f"ZPBS residual cond: {details['zpbs_residual_cond']}",
-            f"Applied normalization radius (um): {details['applied_norm_radius_um']}",
-            f"Observed aperture radius (um): {details['observed_aperture_radius_um']}",
-            "",
-            text,
-        ]
+        detail_lines = self._summary_selection_detail_lines(
+            row=row,
+            resolution_details=resolution_details,
+            preview_text=text,
+            preview_details=details,
+        )
         self.details_output.setPlainText("\n".join(detail_lines))
 
     def _selected_surf_id(self) -> str:

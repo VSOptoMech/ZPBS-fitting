@@ -43,6 +43,12 @@ def uses_posterior_sign_convention(surf_id: str) -> bool:
     return surf_id.upper().startswith("P")
 
 
+def signed_sphere_radius_um(radius_um: float, *, reference_vertex_z_um: float, z0_fit: float) -> float:
+    """Return the signed sphere radius using the maintained export/display branch convention."""
+    sign = 1.0 if float(reference_vertex_z_um) >= float(z0_fit) else -1.0
+    return sign * abs(float(radius_um))
+
+
 def is_focus_surface_family(surf_id: str) -> bool:
     """Return True for the only surface families included in this project analysis."""
     return surf_id.upper() in FOCUS_SURF_IDS

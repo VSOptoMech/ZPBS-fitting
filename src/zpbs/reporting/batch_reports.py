@@ -20,6 +20,7 @@ from zpbs.common import (
     is_focus_surface_family,
     round_sigfigs_array,
     sanitize_h5_name,
+    signed_sphere_radius_um,
     uses_posterior_sign_convention,
 )
 from zpbs.models import FitArtifacts
@@ -77,8 +78,10 @@ def write_batch_zp_report(file_path: Path, artifacts: list[FitArtifacts]) -> Pat
         # the batch-wide report matches the per-file Zemax-facing CSV export.
         export_sign = 1.0 if uses_posterior_sign_convention(item.metadata.surf_id) else -1.0
         export_coefficients_mm = export_sign * export_coefficients_um / 1000.0
-        signed_roc_um = (1.0 if float(item.reference_vertex_z_um) >= float(item.z0_fit) else -1.0) * float(
-            item.applied_reference_radius_um
+        signed_roc_um = signed_sphere_radius_um(
+            item.applied_reference_radius_um,
+            reference_vertex_z_um=item.reference_vertex_z_um,
+            z0_fit=item.z0_fit,
         )
         rows = build_zernike_coefficients_rows(
             design_id=item.metadata.design_id,

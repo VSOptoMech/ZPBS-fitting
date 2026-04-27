@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from matplotlib.figure import Figure
 
-from ..common import format_mae_rms_display, uses_posterior_sign_convention
+from ..common import format_mae_rms_display, signed_sphere_radius_um, uses_posterior_sign_convention
 from ..models import FitArtifacts
 from ..reporting.batch_reports import radial_bin_profile, sphere_profile_z
 from .support import (
@@ -88,7 +88,7 @@ def _render_detailed_analysis(
     ax_residual.set_ylabel("Residual (um)")
     if rho_axis_limit_um is not None:
         ax_residual.set_xlim(0.0, rho_axis_limit_um)
-    zernike_y_min, zernike_y_max, zernike_step = snapped_axis_limits(artifacts.zpbs_to_data_residuals_um)
+    zernike_y_min, zernike_y_max, zernike_step = snapped_axis_limits(z_resid)
     ax_residual.set_ylim(zernike_y_min, zernike_y_max)
     ax_residual.set_yticks(np.arange(zernike_y_min, zernike_y_max + (0.5 * zernike_step), zernike_step))
     ax_residual.grid(True, alpha=0.2)
@@ -100,7 +100,7 @@ def _render_detailed_analysis(
     ax_sphere_residual.set_ylabel("Residual (um)")
     if rho_axis_limit_um is not None:
         ax_sphere_residual.set_xlim(0.0, rho_axis_limit_um)
-    sphere_y_min, sphere_y_max, sphere_step = snapped_axis_limits(artifacts.sphere_residuals_um)
+    sphere_y_min, sphere_y_max, sphere_step = snapped_axis_limits(z_sphere_resid)
     ax_sphere_residual.set_ylim(sphere_y_min, sphere_y_max)
     ax_sphere_residual.set_yticks(np.arange(sphere_y_min, sphere_y_max + (0.5 * sphere_step), sphere_step))
     ax_sphere_residual.grid(True, alpha=0.2)
@@ -110,6 +110,11 @@ def _render_detailed_analysis(
         for index in range(0, len(top_coeffs), 2)
     ]
     coeff_lines = "\n".join(coeff_lines_list) or "No coefficients"
+    signed_radius_um = signed_sphere_radius_um(
+        artifacts.fitted_sphere_radius_um,
+        reference_vertex_z_um=artifacts.reference_vertex_z_um,
+        z0_fit=artifacts.z0_fit,
+    )
     text = "\n".join(
         [
             f"File: {source_file.name}",
@@ -126,7 +131,7 @@ def _render_detailed_analysis(
                 if artifacts.zernike_coeff_sigfigs
                 else "Coeff precision: full"
             ),
-            f"Fitted sphere radius: {artifacts.fitted_sphere_radius_um:.2f} um",
+            f"Fitted sphere radius: {signed_radius_um:.2f} um",
             f"Sphere center: ({artifacts.x0_fit:.2f}, {artifacts.y0_fit:.2f}, {artifacts.z0_fit:.2f}) um",
             (
                 "Target vertex: "

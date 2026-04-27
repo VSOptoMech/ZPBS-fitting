@@ -159,6 +159,8 @@ The viewer provides:
 - `Zernike Residual vs Radius`
 - `Sphere Fit Residual vs Radius`
 - compact selection details with key fit settings, top Zernike coefficients, replay path details, and lower-level diagnostics
+- residual y-axis limits that snap tightly around the visible binned residual curves
+- signed fitted sphere radius display matching the coefficient export convention
 
 If a completed run folder is copied to another machine, coefficient paths under the original run folder are remapped automatically to the folder containing the loaded workbook. Raw `.xyz` files can be remapped by setting `Local XYZ Root`.
 

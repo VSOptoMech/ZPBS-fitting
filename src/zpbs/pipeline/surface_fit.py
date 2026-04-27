@@ -22,6 +22,7 @@ from zpbs.common import (
     make_output_filename,
     round_nearest_micrometer,
     round_sigfigs_array,
+    signed_sphere_radius_um,
     uses_posterior_sign_convention,
     validate_center_weight,
     validate_zernike_method,
@@ -366,8 +367,10 @@ def build_fit_artifacts(
     # need one extra sign inversion here so the written coefficients are Zemax-ready.
     export_sign = 1.0 if uses_posterior_sign_convention(metadata.surf_id) else -1.0
     export_coefficients_mm = export_sign * export_coefficients_um / 1000.0
-    signed_roc_um = (1.0 if float(fit_data["reference_vertex_z_um"]) >= float(fit_data["z0_fit"]) else -1.0) * float(
-        fit_data["applied_reference_radius_um"]
+    signed_roc_um = signed_sphere_radius_um(
+        fit_data["applied_reference_radius_um"],
+        reference_vertex_z_um=fit_data["reference_vertex_z_um"],
+        z0_fit=fit_data["z0_fit"],
     )
 
     coeff_dir = output_dir / "coefficients"

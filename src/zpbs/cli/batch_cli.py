@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,11 @@ from zpbs.common import (
 )
 from zpbs.io.xyz import collapse_identical_initial_inputs, parse_surface_metadata
 from zpbs.pipeline.surface_fit import build_fit_artifacts, get_sphere_prefit_entry
+from zpbs.pipeline.tilt_correction import (
+    VertexTiltCorrection,
+    apply_vertex_tilt_correction_to_artifacts,
+    export_coefficient_rows_for_artifacts,
+)
 from zpbs.reporting.batch_reports import (
     artifacts_to_summary_row,
     resolve_h5_path,
@@ -31,6 +37,29 @@ from zpbs.reporting.batch_reports import (
     write_qa_report,
     write_xlsx,
 )
+
+
+def _write_name_value_rows(path: Path, rows: list[tuple[str, str]]) -> None:
+    """Write two-column name/value rows to a CSV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle, dialect="excel")
+        writer.writerows(rows)
+
+
+def _tilt_correction_summary_fields(correction: VertexTiltCorrection) -> dict[str, Any]:
+    """Return compact per-file summary fields for optional vertex tilt correction."""
+    return {
+        "vertex_tilt_correction": "on",
+        "original_center_slope_x_mrad": correction.original_x_mrad,
+        "original_center_slope_y_mrad": correction.original_y_mrad,
+        "original_center_slope_magnitude_mrad": correction.original_magnitude_mrad,
+        "corrected_center_slope_x_mrad": correction.corrected_x_mrad,
+        "corrected_center_slope_y_mrad": correction.corrected_y_mrad,
+        "corrected_center_slope_magnitude_mrad": correction.corrected_magnitude_mrad,
+        "delta_z2_um": correction.delta_z2_um,
+        "delta_z3_um": correction.delta_z3_um,
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -117,6 +146,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_const",
         const=None,
         help="Disable Zernike coefficient rounding and keep full-precision coefficients.",
+    )
+    parser.add_argument(
+        "--zero-vertex-tilt",
+        action="store_true",
+        help=(
+            "Adjust residual Z2/Z3 after fitting so the exported Zernike model has zero net center slope. "
+            "This is an optional Zemax-facing correction."
+        ),
     )
     parser.add_argument("--limit", type=int, default=None, help="Optional cap on number of files processed.")
     parser.add_argument(
@@ -325,8 +362,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.roc_mode == "average-best-fit":
                 item.prefit_best_radius_um = prefit_radii.get(file_path)
+            correction = None
+            if args.zero_vertex_tilt:
+                item, correction = apply_vertex_tilt_correction_to_artifacts(item)
+                _write_name_value_rows(item.output_coefficients_csv, export_coefficient_rows_for_artifacts(item))
             artifacts.append(item)
-            summary_rows.append(artifacts_to_summary_row(item))
+            summary_row = artifacts_to_summary_row(item)
+            if correction is not None:
+                summary_row.update(_tilt_correction_summary_fields(correction))
+            summary_rows.append(summary_row)
             print(f"processed: {file_path}")
         except Exception as exc:
             failure = {"source_file": str(file_path), "error": str(exc)}
@@ -366,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             "rcond": args.rcond,
             "round_radii_um": args.round_radii_um,
             "zernike_coeff_sigfigs": args.zernike_coeff_sigfigs,
+            "zero_vertex_tilt": args.zero_vertex_tilt,
             "h5_path": str(h5_path) if h5_path is not None else None,
             "qa_report": args.qa_report,
             "processed_files": len(artifacts),
@@ -394,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
                 "rcond": args.rcond,
                 "round_radii_um": args.round_radii_um,
                 "zernike_coeff_sigfigs": args.zernike_coeff_sigfigs,
+                "zero_vertex_tilt": args.zero_vertex_tilt,
                 "run_dir": str(run_dir),
             },
             artifacts=artifacts,

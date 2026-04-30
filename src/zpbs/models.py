@@ -17,6 +17,8 @@ class SurfaceMetadata:
     force_id: str
     surface_token: str
     surf_id: str
+    filename_kind: str = "standard"
+    filename_suffix: str = ""
 
 
 @dataclass

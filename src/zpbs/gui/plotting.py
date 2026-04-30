@@ -132,14 +132,14 @@ def _render_detailed_analysis(
                 else "Coeff precision: full"
             ),
             f"Fitted sphere radius: {signed_radius_um:.2f} um",
-            f"Sphere center: ({artifacts.x0_fit:.2f}, {artifacts.y0_fit:.2f}, {artifacts.z0_fit:.2f}) um",
+            f"Sphere center: ({artifacts.x0_fit:.3f}, {artifacts.y0_fit:.3f}, {artifacts.z0_fit:.3f}) um",
             (
                 "Target vertex: "
-                f"({artifacts.target_vertex_x_um:.2f}, {artifacts.target_vertex_y_um:.2f}, {artifacts.target_vertex_z_um:.2f}) um"
+                f"({artifacts.target_vertex_x_um:.3f}, {artifacts.target_vertex_y_um:.3f}, {artifacts.target_vertex_z_um:.3f}) um"
             ),
             (
                 "Reference vertex: "
-                f"({artifacts.reference_vertex_x_um:.2f}, {artifacts.reference_vertex_y_um:.2f}, {artifacts.reference_vertex_z_um:.2f}) um"
+                f"({artifacts.reference_vertex_x_um:.3f}, {artifacts.reference_vertex_y_um:.3f}, {artifacts.reference_vertex_z_um:.3f}) um"
             ),
             f"Vertex mismatch z: {artifacts.vertex_mismatch_z_um:.2e} um",
             f"Applied norm radius: {artifacts.norm_radius_um:.2f} um",

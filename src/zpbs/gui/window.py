@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 from datetime import datetime
+from html import escape
 from collections.abc import Callable
 from pathlib import Path
 
@@ -35,18 +36,27 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QTableWidget,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from ..common import format_mae_rms_display, is_focus_surface_family, validate_sphere_reference_configuration
+from ..common import (
+    format_mae_rms_display,
+    is_focus_surface_family,
+    parse_boolish,
+    validate_sphere_reference_configuration,
+)
 from ..io.xyz import collapse_identical_initial_inputs, parse_surface_metadata
 from .canvases import FitPreviewCanvas, NumericTableWidgetItem, OverviewPlotCanvas
 from .single_file import (
     SingleFileAnalysisRequest,
     SingleFileAnalysisResult,
     SingleFileAnalysisWorker,
+    VertexTiltCorrection,
+    build_tilt_corrected_single_file_result,
     build_single_file_candidates,
+    tilt_correction_summary_rows,
     validate_single_file_source,
 )
 from .support import (
@@ -224,8 +234,12 @@ class BatchFitWindow(QMainWindow):
 
         self.single_file_round_radii_check = QCheckBox("Round radii", self)
         self.single_file_round_coeffs_check = QCheckBox("Round coefficients", self)
+        self.single_file_tilt_correction_check = QCheckBox("Tilt correction", self)
         self.single_file_round_radii_check.setChecked(True)
         self.single_file_round_coeffs_check.setChecked(True)
+        self.single_file_tilt_correction_check.setToolTip(
+            "Single File only: adjust displayed/exported Z2/Z3 so the net Zernike center slope is zero."
+        )
         self.single_file_save_csv_button = QPushButton("Save CSV...", self)
         self.single_file_save_overview_button = QPushButton("Save Overview Plot...", self)
         self.single_file_save_bundle_button = QPushButton("Save Bundle...", self)
@@ -314,6 +328,7 @@ class BatchFitWindow(QMainWindow):
             button.clicked.connect(lambda _checked, _suffix=suffix: self._apply_single_file_selection_from_controls())
             self.single_file_state_buttons[suffix] = button
             state_layout.addWidget(button)
+        state_layout.addWidget(self.single_file_tilt_correction_check)
         selector_layout.addWidget(state_widget)
         selector_layout.addStretch(1)
         selector_layout.addWidget(self.single_file_refresh_button)
@@ -359,6 +374,7 @@ class BatchFitWindow(QMainWindow):
         self.single_file_n_modes_spin.valueChanged.connect(self._on_single_file_option_changed)
         self.single_file_round_radii_check.stateChanged.connect(self._on_single_file_option_changed)
         self.single_file_round_coeffs_check.stateChanged.connect(self._on_single_file_option_changed)
+        self.single_file_tilt_correction_check.stateChanged.connect(self._on_single_file_tilt_correction_changed)
 
         self._sync_single_file_controls()
         return group
@@ -394,7 +410,7 @@ class BatchFitWindow(QMainWindow):
 
     def _diagnostic_rows_for_result(self, result: SingleFileAnalysisResult) -> list[tuple[str, str]]:
         artifacts = result.artifacts
-        return [
+        rows = [
             ("Source file", str(artifacts.source_file)),
             ("Temp result directory", str(result.result_dir)),
             ("Points used", str(artifacts.points_used)),
@@ -419,6 +435,29 @@ class BatchFitWindow(QMainWindow):
             ("Overview plot", str(result.overview_plot_path)),
             ("Analysis JSON", str(result.analysis_json_path)),
         ]
+        if artifacts.metadata.filename_kind == "suffixed":
+            rows.append(("Filename suffix", artifacts.metadata.filename_suffix))
+        elif artifacts.metadata.filename_kind == "generic":
+            rows.extend(
+                [
+                    ("Filename kind", "generic"),
+                    ("Surface convention", artifacts.metadata.surf_id),
+                ]
+            )
+        if result.summary_row.get("vertex_tilt_correction") == "on":
+            rows.extend(
+                tilt_correction_summary_rows(
+                    VertexTiltCorrection(
+                        original_x_mrad=float(result.summary_row["original_center_slope_x_mrad"]),
+                        original_y_mrad=float(result.summary_row["original_center_slope_y_mrad"]),
+                        corrected_x_mrad=float(result.summary_row["corrected_center_slope_x_mrad"]),
+                        corrected_y_mrad=float(result.summary_row["corrected_center_slope_y_mrad"]),
+                        delta_z2_um=float(result.summary_row["delta_z2_um"]),
+                        delta_z3_um=float(result.summary_row["delta_z3_um"]),
+                    )
+                )
+            )
+        return rows
 
     def _fit_data_rows_for_result(self, result: SingleFileAnalysisResult) -> list[tuple[str, str]]:
         coeff_rows = list(result.coeff_rows)
@@ -435,6 +474,24 @@ class BatchFitWindow(QMainWindow):
         sphere_fit_mode = str(self.single_file_sphere_fit_mode_combo.currentData())
         self.single_file_center_weight_spin.setEnabled(sphere_fit_mode == "center_weighted")
         self._update_single_file_force_navigation_buttons()
+
+    def _set_single_file_generic_navigation_state(self) -> None:
+        for button in self.single_file_surf_buttons.values():
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.setEnabled(False)
+            button.blockSignals(False)
+        self.single_file_force_combo.blockSignals(True)
+        self.single_file_force_combo.clear()
+        self.single_file_force_combo.setEnabled(False)
+        self.single_file_force_combo.blockSignals(False)
+        for button in self.single_file_state_buttons.values():
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.setEnabled(False)
+            button.blockSignals(False)
+        self.single_file_prev_button.setEnabled(False)
+        self.single_file_next_button.setEnabled(False)
 
     def _refresh_single_file_export_buttons(self) -> None:
         enabled = self.single_file_result is not None
@@ -529,13 +586,29 @@ class BatchFitWindow(QMainWindow):
     def _render_single_file_result(self, result: SingleFileAnalysisResult, *, cached_result: bool) -> None:
         self.single_file_result = result
         self.single_file_results_cache[result.cache_key] = result
-        self.single_file_overview_canvas.plot_artifacts(result.artifacts)
-        self._populate_name_value_table(self.single_file_fit_data_table, self._fit_data_rows_for_result(result))
+        display_result = self._single_file_display_result()
+        if display_result is None:
+            return
+        self.single_file_overview_canvas.plot_artifacts(display_result.artifacts)
+        self._populate_name_value_table(self.single_file_fit_data_table, self._fit_data_rows_for_result(display_result))
         status_prefix = "Loaded cached analysis" if cached_result else "Analysis ready"
+        correction_suffix = " | tilt correction on" if display_result is not result else ""
         self._set_single_file_status(
-            f"{status_prefix}: {result.artifacts.source_file.name} | temp: {result.result_dir}"
+            f"{status_prefix}: {result.artifacts.source_file.name} | temp: {result.result_dir}{correction_suffix}"
         )
         self._refresh_single_file_export_buttons()
+
+    def _single_file_display_result(self) -> SingleFileAnalysisResult | None:
+        if self.single_file_result is None:
+            return None
+        if self.single_file_tilt_correction_check.isChecked():
+            return build_tilt_corrected_single_file_result(self.single_file_result)
+        return self.single_file_result
+
+    def _on_single_file_tilt_correction_changed(self) -> None:
+        if self.single_file_result is None:
+            return
+        self._render_single_file_result(self.single_file_result, cached_result=True)
 
     def _single_file_analysis_finished(self, result: SingleFileAnalysisResult) -> None:
         if result.request_id != self._single_file_active_request_id:
@@ -564,6 +637,10 @@ class BatchFitWindow(QMainWindow):
     def _single_file_metadata(self, source_file: Path) -> object:
         return parse_surface_metadata(source_file)
 
+    def _current_single_file_is_generic(self) -> bool:
+        source_file = self._current_single_file_source()
+        return source_file is not None and self._single_file_metadata(source_file).filename_kind == "generic"
+
     def _single_file_selected_surf_id(self) -> str:
         for surf_id, button in self.single_file_surf_buttons.items():
             if button.isChecked():
@@ -577,6 +654,8 @@ class BatchFitWindow(QMainWindow):
         return ""
 
     def _single_file_current_candidate(self) -> Path | None:
+        if self._current_single_file_is_generic():
+            return None
         surf_id = self._single_file_selected_surf_id()
         force_id = self.single_file_force_combo.currentText()
         suffix = self._single_file_selected_state_suffix()
@@ -597,10 +676,14 @@ class BatchFitWindow(QMainWindow):
         self._refresh_single_file_surf_options(preferred=preferred)
 
     def _refresh_single_file_surf_options(self, preferred: Path | None = None) -> None:
-        available = {self._single_file_metadata(path).surf_id for path in self.single_file_candidates}
-        preferred_surf_id = (
-            self._single_file_metadata(preferred).surf_id if preferred is not None and preferred.exists() else ""
+        preferred_metadata = (
+            self._single_file_metadata(preferred) if preferred is not None and preferred.exists() else None
         )
+        if preferred_metadata is not None and preferred_metadata.filename_kind == "generic":
+            self._set_single_file_generic_navigation_state()
+            return
+        available = {self._single_file_metadata(path).surf_id for path in self.single_file_candidates}
+        preferred_surf_id = preferred_metadata.surf_id if preferred_metadata is not None else ""
         current = self._single_file_selected_surf_id()
         target = (
             current
@@ -612,6 +695,7 @@ class BatchFitWindow(QMainWindow):
                 None,
             )
         )
+        self.single_file_force_combo.setEnabled(bool(target))
         for surf_id, button in self.single_file_surf_buttons.items():
             button.blockSignals(True)
             button.setEnabled(surf_id in available)
@@ -620,6 +704,7 @@ class BatchFitWindow(QMainWindow):
         self._refresh_single_file_force_options(preferred=preferred)
 
     def _refresh_single_file_force_options(self, preferred: Path | None = None) -> None:
+        self.single_file_force_combo.setEnabled(True)
         surf_id = self._single_file_selected_surf_id()
         matching = [path for path in self.single_file_candidates if self._single_file_metadata(path).surf_id == surf_id]
         force_ids = sorted({self._single_file_metadata(path).force_id for path in matching}, key=self._force_sort_key)
@@ -705,6 +790,10 @@ class BatchFitWindow(QMainWindow):
         self._update_single_file_force_navigation_buttons()
 
     def _update_single_file_force_navigation_buttons(self) -> None:
+        if self._current_single_file_is_generic():
+            self.single_file_prev_button.setEnabled(False)
+            self.single_file_next_button.setEnabled(False)
+            return
         count = self.single_file_force_combo.count()
         current = self.single_file_force_combo.currentIndex()
         has_items = count > 0 and current >= 0
@@ -725,16 +814,25 @@ class BatchFitWindow(QMainWindow):
         preferred = self._current_single_file_source()
         self._set_single_file_candidates(candidates, preferred=preferred)
         if candidates:
-            selected_path = (
-                preferred
-                if preferred is not None and preferred.resolve() in {path.resolve() for path in candidates}
-                else candidates[0]
-            )
+            candidate_resolved = {path.resolve() for path in candidates}
+            selected_path = preferred if preferred is not None and preferred.resolve() in candidate_resolved else None
+            if selected_path is None:
+                selected_path = next(
+                    (
+                        path
+                        for path in candidates
+                        if self._single_file_metadata(path).filename_kind != "generic"
+                        and is_focus_surface_family(self._single_file_metadata(path).surf_id)
+                    ),
+                    candidates[0],
+                )
             self._apply_single_file_source(selected_path, queue_analysis=True)
-            self._set_single_file_status(f"Loaded {len(candidates)} maintained files from {folder}.")
+            self._set_single_file_status(f"Loaded {len(candidates)} Single File-compatible .xyz files from {folder}.")
         else:
-            self._set_single_file_status(f"No maintained AA/AP/PA/PP files matched *_FVS_*.xyz in {folder}.")
-            self._clear_single_file_result_views("No maintained AA/AP/PA/PP files were found in the selected folder.")
+            self._set_single_file_status(f"No Single File-compatible .xyz files were found in {folder}.")
+            self._clear_single_file_result_views(
+                "No Single File-compatible .xyz files were found in the selected folder."
+            )
 
     def _apply_single_file_source(self, source_file: Path, *, queue_analysis: bool) -> None:
         self.single_file_path_edit.blockSignals(True)
@@ -782,22 +880,24 @@ class BatchFitWindow(QMainWindow):
         shutil.copy2(source_path, selected)
 
     def save_single_file_csv(self) -> None:
-        if self.single_file_result is None:
+        display_result = self._single_file_display_result()
+        if display_result is None:
             return
         self._copy_single_file_artifact(
-            self.single_file_result.csv_path,
+            display_result.csv_path,
             caption="Save Coefficient CSV",
-            default_name=self.single_file_result.csv_path.name,
+            default_name=display_result.csv_path.name,
             file_filter="CSV Files (*.csv);;All Files (*)",
         )
 
     def save_single_file_overview_plot(self) -> None:
-        if self.single_file_result is None:
+        display_result = self._single_file_display_result()
+        if display_result is None:
             return
         self._copy_single_file_artifact(
-            self.single_file_result.overview_plot_path,
+            display_result.overview_plot_path,
             caption="Save Overview Plot",
-            default_name=self.single_file_result.overview_plot_path.name,
+            default_name=display_result.overview_plot_path.name,
             file_filter="PNG Files (*.png);;All Files (*)",
         )
 
@@ -986,8 +1086,12 @@ class BatchFitWindow(QMainWindow):
 
         self.round_radii_check = QCheckBox("Round radii to nearest um before fitting", self)
         self.round_coeffs_check = QCheckBox("Round Zernike coefficients to 6 sig figs", self)
+        self.zero_vertex_tilt_check = QCheckBox("Tilt correction", self)
         self.round_radii_check.setChecked(True)
         self.round_coeffs_check.setChecked(True)
+        self.zero_vertex_tilt_check.setToolTip(
+            "Adjust exported residual Z2/Z3 after fitting so the Zernike model has zero net center slope."
+        )
         self.roc_mode_combo.setCurrentIndex(self.roc_mode_combo.findData("fit-per-file"))
         self.sphere_fit_mode_combo.setCurrentIndex(self.sphere_fit_mode_combo.findData("center_weighted"))
         self.normalization_mode_combo.setCurrentIndex(self.normalization_mode_combo.findData("per-file"))
@@ -1033,6 +1137,7 @@ class BatchFitWindow(QMainWindow):
         rounding_layout.addWidget(self._section_label("Rounding"))
         rounding_layout.addWidget(self.round_radii_check)
         rounding_layout.addWidget(self.round_coeffs_check)
+        rounding_layout.addWidget(self.zero_vertex_tilt_check)
 
         self.roc_mode_combo.currentIndexChanged.connect(self._on_roc_mode_changed)
         self.sphere_fit_mode_combo.currentIndexChanged.connect(self._on_sphere_fit_mode_changed)
@@ -1042,6 +1147,7 @@ class BatchFitWindow(QMainWindow):
         self.n_modes_spin.valueChanged.connect(self.refresh_command_preview)
         self.round_radii_check.stateChanged.connect(self.refresh_command_preview)
         self.round_coeffs_check.stateChanged.connect(self.refresh_command_preview)
+        self.zero_vertex_tilt_check.stateChanged.connect(self.refresh_command_preview)
 
         layout.addLayout(sphere_grid)
         layout.addLayout(residual_grid)
@@ -1246,9 +1352,9 @@ class BatchFitWindow(QMainWindow):
     def _build_details_group(self) -> QGroupBox:
         group = QGroupBox("Selection Details", self)
         layout = QVBoxLayout(group)
-        self.details_output = QPlainTextEdit(self)
+        self.details_output = QTextEdit(self)
         self.details_output.setReadOnly(True)
-        self.details_output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.details_output.setLineWrapMode(QTextEdit.NoWrap)
         layout.addWidget(self.details_output)
         return group
 
@@ -1391,6 +1497,8 @@ class BatchFitWindow(QMainWindow):
             args.append("--no-round-radii-um")
         if not self.round_coeffs_check.isChecked():
             args.append("--no-round-zernike-coeffs")
+        if self.zero_vertex_tilt_check.isChecked():
+            args.append("--zero-vertex-tilt")
         if self.fail_fast_check.isChecked():
             args.append("--fail-fast")
         if self.qa_report_check.isChecked():
@@ -1711,6 +1819,64 @@ class BatchFitWindow(QMainWindow):
                 fields[label] = value
         return fields, top_coeff_lines
 
+    def _set_details_output_lines(self, lines: list[str]) -> None:
+        bold_lines = {"Diagnostics and Locations", "Tilt Removal"}
+        html_lines: list[str] = []
+        for line in lines:
+            rendered = escape(line)
+            if line in bold_lines:
+                rendered = f"<strong>{rendered}</strong>"
+            html_lines.append(rendered)
+        self.details_output.setHtml(
+            "<div style='font-family: monospace; white-space: pre;'>" + "<br>".join(html_lines) + "</div>"
+        )
+
+    def _summary_folder_name(self) -> str:
+        if self.summary_workbook_path is not None:
+            return self.summary_workbook_path.parent.name
+        return self._summary_display_run_name()
+
+    def _summary_uses_center_weight(self, row: dict[str, str], fields: dict[str, str]) -> bool:
+        mode = str(row.get("sphere_fit_mode") or self.summary_manifest.get("sphere_fit_mode") or "").strip().lower()
+        mode = mode.replace("-", "_").replace(" ", "_")
+        if mode:
+            return mode == "center_weighted"
+        return fields.get("Sphere fit mode", "").strip().lower().replace(" ", "_") == "center_weighted"
+
+    def _summary_workbook_uses_zero_vertex_tilt(self, row: dict[str, str]) -> bool:
+        return parse_boolish(self.summary_manifest.get("zero_vertex_tilt"), default=False) or parse_boolish(
+            row.get("vertex_tilt_correction"), default=False
+        )
+
+    @staticmethod
+    def _format_row_float(row: dict[str, str], key: str, *, precision: int) -> str | None:
+        value = parse_optional_float(row.get(key, ""))
+        if value is None:
+            return None
+        return f"{value:.{precision}f}"
+
+    def _append_tilt_removal_detail_lines(self, detail_lines: list[str], row: dict[str, str]) -> None:
+        detail_lines.extend(["", "Tilt Removal", "Vertex tilt correction: on"])
+        fields = [
+            ("original_center_slope_x_mrad", "Original center slope x (mrad)", 6),
+            ("original_center_slope_y_mrad", "Original center slope y (mrad)", 6),
+            ("original_center_slope_magnitude_mrad", "Original center slope magnitude (mrad)", 6),
+            ("corrected_center_slope_x_mrad", "Corrected center slope x (mrad)", 6),
+            ("corrected_center_slope_y_mrad", "Corrected center slope y (mrad)", 6),
+            ("corrected_center_slope_magnitude_mrad", "Corrected center slope magnitude (mrad)", 6),
+            ("delta_z2_um", "Applied Z2 correction (um)", 9),
+            ("delta_z3_um", "Applied Z3 correction (um)", 9),
+        ]
+        appended = False
+        for key, label, precision in fields:
+            formatted = self._format_row_float(row, key, precision=precision)
+            if formatted is None:
+                continue
+            detail_lines.append(f"{label}: {formatted}")
+            appended = True
+        if not appended:
+            detail_lines.append("Per-file correction details: not stored in this workbook.")
+
     def _summary_selection_detail_lines(
         self,
         *,
@@ -1723,19 +1889,12 @@ class BatchFitWindow(QMainWindow):
         source_remapped = self._has_actual_summary_remap(resolution_details["source_resolution_strategy"])
         coeff_remapped = self._has_actual_summary_remap(resolution_details["coeff_resolution_strategy"])
 
-        detail_lines = [
-            "Key fit details",
-            (
-                f"Selected row: {self._summary_display_run_name()} | "
-                f"{row['surf_id']} | {row['force_id']} | {row['surface_token']}"
-            ),
-        ]
+        detail_lines = [f"Folder: {self._summary_folder_name()}"]
 
         for label in (
             "File",
             "Surface",
             "Force",
-            "ROC mode",
             "Sphere fit mode",
             "Center weight",
             "Norm mode",
@@ -1744,25 +1903,28 @@ class BatchFitWindow(QMainWindow):
             "Observed aperture radius",
         ):
             if label in fields:
+                if label == "Center weight" and not self._summary_uses_center_weight(row, fields):
+                    continue
+                detail_lines.append(f"{label}: {fields[label]}")
+
+        for label in ("Sphere center", "Target vertex", "Reference vertex", "Vertex mismatch z"):
+            if label in fields:
                 detail_lines.append(f"{label}: {fields[label]}")
 
         if top_coeff_lines:
             detail_lines.extend(["Top Zernike coefficients:", *top_coeff_lines])
 
-        detail_lines.extend(["", "Sphere geometry"])
-        for label in ("Sphere center", "Target vertex", "Reference vertex", "Vertex mismatch z"):
-            if label in fields:
-                detail_lines.append(f"{label}: {fields[label]}")
-
         detail_lines.extend(
             [
                 "",
-                "Workbook and replay",
-                f"Workbook path: {self.summary_workbook_path}"
-                if self.summary_workbook_path is not None
-                else "Workbook path:",
+                "Diagnostics and Locations",
+                f"Sphere RMS (um): {preview_details['sphere_rms_um']}",
+                f"ZPBS residual RMS (um): {preview_details['zpbs_residual_rms_um']}",
+                f"ZPBS residual cond: {preview_details['zpbs_residual_cond']}",
             ]
         )
+        if "Coeff metadata radius" in fields:
+            detail_lines.append(f"Coefficient metadata radius: {fields['Coeff metadata radius']}")
         if source_remapped:
             detail_lines.extend(
                 [
@@ -1777,20 +1939,10 @@ class BatchFitWindow(QMainWindow):
                     f"Original coefficient file: {resolution_details['original_coeff_file']}",
                 ]
             )
-
-        detail_lines.extend(
-            [
-                "",
-                "Diagnostics and locations",
-                f"Sphere RMS (um): {preview_details['sphere_rms_um']}",
-                f"ZPBS residual RMS (um): {preview_details['zpbs_residual_rms_um']}",
-                f"ZPBS residual cond: {preview_details['zpbs_residual_cond']}",
-            ]
-        )
-        if "Coeff metadata radius" in fields:
-            detail_lines.append(f"Coefficient metadata radius: {fields['Coeff metadata radius']}")
         if coeff_remapped:
             detail_lines.append(f"Coefficient file: {preview_details['coeff_file']}")
+        if self._summary_workbook_uses_zero_vertex_tilt(row):
+            self._append_tilt_removal_detail_lines(detail_lines, row)
         return detail_lines
 
     def _refresh_surf_options(self) -> None:
@@ -1890,7 +2042,7 @@ class BatchFitWindow(QMainWindow):
             preview_text=text,
             preview_details=details,
         )
-        self.details_output.setPlainText("\n".join(detail_lines))
+        self._set_details_output_lines(detail_lines)
 
     def _selected_surf_id(self) -> str:
         for surf_id, button in self.surf_id_buttons.items():

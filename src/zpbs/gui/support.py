@@ -22,6 +22,7 @@ NORMALIZATION_MODE_LABELS = {
     "per-file": "Per-File Aperture",
     "common-per-surf-id": "Shared Aperture by Surface Family",
 }
+
 def display_label(mapping: dict[str, str], value: str) -> str:
     """Return the human-friendly display label for one persisted token."""
     return mapping.get(value, value)

@@ -73,6 +73,7 @@ Common useful options:
 - `--qa-report`: generate an HTML QA gallery
 - `--fail-fast`: stop on the first file error
 - `--h5-path`: append results to a shared HDF5 file
+- `--zero-vertex-tilt`: adjust residual Z2/Z3 after fitting so exported Zernikes have zero net center slope
 
 Current maintained defaults:
 
@@ -82,6 +83,7 @@ Current maintained defaults:
 - radius rounding: on
 - Zernike coefficient rounding: `6` significant digits
 - Zernike fitting method: maintained `lstsq` only
+- vertex tilt correction: off
 - GUI HDF5 export: off by default because HDF5 output includes raw point-cloud data and absolute source paths
 
 Default opt-out flags:
@@ -107,11 +109,13 @@ Typical contents:
 
 Per-surface coefficient CSVs include:
 
-- `Base sphere radius (mm)`
+- `Base sphere ROC (mm)` as a signed Zemax-ready ROC
 - `Vertex (mm)` as the final near-center ZPBS fitted axial location
 - `Vertex residual (mm)` as the near-center residual after the full ZPBS-to-data reconstruction
 - `Norm. Radius (mm)`
 - Zernike terms `Z1..Z45`
+
+When vertex tilt correction is enabled, batch summaries also include per-file tilt-removal diagnostics and the exported coefficient CSVs/report are written from the corrected coefficient vector.
 
 ## GUI
 
@@ -134,6 +138,8 @@ Public-release constraint:
 The GUI builds and launches the same batch command you can run from the CLI.
 
 The command preview reflects the actual CLI arguments that will be run.
+
+The optional `Tilt correction` checkbox adds `--zero-vertex-tilt` and records per-file tilt-removal diagnostics in generated summaries.
 
 ### Single File
 
@@ -158,7 +164,8 @@ The viewer provides:
 - measured surface map
 - `Zernike Residual vs Radius`
 - `Sphere Fit Residual vs Radius`
-- compact selection details with key fit settings, top Zernike coefficients, replay path details, and lower-level diagnostics
+- compact selection details with run folder, fit settings, sphere geometry, top Zernike coefficients, remap paths only when used, and bold diagnostics/location details
+- a final `Tilt Removal` section for workbooks produced with vertex tilt correction
 - residual y-axis limits that snap tightly around the visible binned residual curves
 - signed fitted sphere radius display matching the coefficient export convention
 

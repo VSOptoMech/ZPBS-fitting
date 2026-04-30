@@ -7,11 +7,12 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
-from zpbs.common import force_sort_key
+from zpbs.common import force_sort_key, sanitize_h5_name
 from zpbs.models import ProcessingInput, SurfaceMetadata
 
 NOTEBOOK_FILENAME_RE = re.compile(
-    r"^(?P<design_token>R\d+V(?P<design_id>[^-_]+))-(?P<fea_id>[^_]+)_(?P<force_id>F[^_]+)_FVS_(?P<surface_token>[A-Za-z]+)$"
+    r"^(?P<design_token>R\d+V(?P<design_id>[^-_]+))-(?P<fea_id>[^_]+)_(?P<force_id>F[^_]+)_FVS_"
+    r"(?P<surface_token>[A-Za-z]{2,3})(?:_(?P<filename_suffix>.+))?$"
 )
 
 
@@ -22,6 +23,7 @@ def parse_surface_metadata(file_path: Path) -> SurfaceMetadata:
     if match is not None:
         groups = match.groupdict()
         surface_token = groups["surface_token"].upper()
+        filename_suffix = groups.get("filename_suffix") or ""
         if surface_token.endswith(("I", "D")) and len(surface_token) > 2:
             surf_id = surface_token[:-1]
         else:
@@ -33,17 +35,19 @@ def parse_surface_metadata(file_path: Path) -> SurfaceMetadata:
             force_id=groups["force_id"],
             surface_token=surface_token,
             surf_id=surf_id,
+            filename_kind="suffixed" if filename_suffix else "standard",
+            filename_suffix=filename_suffix,
         )
 
-    prefix = stem.split("_", maxsplit=1)[0]
-    design_id = prefix.split("V")[-1] if "V" in prefix else prefix
+    generic_token = sanitize_h5_name(stem)
     return SurfaceMetadata(
-        design_token=prefix,
-        design_id=design_id,
-        fea_id="UNKNOWN",
-        force_id="UNKNOWN",
-        surface_token="UNKNOWN",
-        surf_id="UNKNOWN",
+        design_token=generic_token,
+        design_id=generic_token,
+        fea_id="GENERIC",
+        force_id="F0.0mN",
+        surface_token="GENERIC",
+        surf_id="GENERIC",
+        filename_kind="generic",
     )
 
 

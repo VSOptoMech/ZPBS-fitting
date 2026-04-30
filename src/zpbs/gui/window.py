@@ -1744,8 +1744,15 @@ class BatchFitWindow(QMainWindow):
         if not path.exists():
             QMessageBox.warning(self, "Missing Summary", f"Summary workbook not found:\n{path}")
             return
+        if not path.is_file():
+            QMessageBox.warning(self, "Invalid Summary", f"Summary workbook path is not a file:\n{path}")
+            return
 
-        rows = parse_inline_xlsx_rows(path)
+        try:
+            rows = parse_inline_xlsx_rows(path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Summary", str(exc))
+            return
         rows = [row for row in rows if row.get("surf_id") in FOCUS_SURF_IDS]
         if not rows:
             QMessageBox.warning(self, "No Rows", "No AA/AP/PA/PP rows were found in the workbook.")

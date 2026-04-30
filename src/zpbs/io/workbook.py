@@ -4,7 +4,7 @@ import csv
 import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 COMPACT_SUMMARY_COLUMNS = (
@@ -67,9 +67,19 @@ def _xlsx_cell_text(cell: ET.Element, shared_strings: list[str]) -> str:
 
 def parse_inline_xlsx_rows(file_path: Path) -> list[dict[str, str]]:
     """Read a minimal XLSX sheet into row dictionaries."""
-    with ZipFile(file_path) as workbook:
-        shared_strings = _load_shared_strings(workbook)
-        sheet = ET.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+    if not file_path.is_file():
+        raise ValueError(f"Summary workbook is not a file: {file_path}")
+
+    try:
+        with ZipFile(file_path) as workbook:
+            shared_strings = _load_shared_strings(workbook)
+            sheet = ET.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+    except BadZipFile as exc:
+        raise ValueError(f"Summary workbook is not a valid .xlsx file: {file_path}") from exc
+    except KeyError as exc:
+        raise ValueError(f"Summary workbook is missing xl/worksheets/sheet1.xml: {file_path}") from exc
+    except ET.ParseError as exc:
+        raise ValueError(f"Summary workbook contains invalid XML: {file_path}") from exc
 
     row_elements = sheet.find("x:sheetData", XLSX_NS)
     if row_elements is None:
